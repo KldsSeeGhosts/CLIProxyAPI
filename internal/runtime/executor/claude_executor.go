@@ -25,6 +25,11 @@ type ClaudeExecutor struct {
 	requestLogProvider      string
 	upstreamModelNormalizer func(string) string
 	oauthProfileFetcher     claudeOAuthProfileFetcher
+	// providerKey overrides the provider identity used for usage attribution,
+	// request logging, and thinking model-capability lookups when this executor
+	// is embedded by another (e.g. ZAIExecutor sets "zai"). Empty falls back to
+	// Identifier().
+	providerKey string
 }
 
 type claudeOAuthCancellationError struct {
@@ -147,6 +152,18 @@ func (e *ClaudeExecutor) upstreamRequestLogProvider() string {
 	return e.Identifier()
 }
 
+// ProviderKey returns the provider key used for usage attribution, request
+// logging, and thinking model-capability lookups. It defaults to the executor
+// identifier but can be overridden (ZAIExecutor sets "zai") so requests that
+// reuse the Claude wire format are still attributed to the real provider and
+// resolve model capabilities from the correct catalog.
+func (e *ClaudeExecutor) ProviderKey() string {
+	if strings.TrimSpace(e.providerKey) != "" {
+		return e.providerKey
+	}
+	return e.Identifier()
+}
+
 func (e *ClaudeExecutor) upstreamModel(baseModel string) string {
 	if e.upstreamModelNormalizer != nil {
 		return e.upstreamModelNormalizer(baseModel)
@@ -213,9 +230,10 @@ func (e *ClaudeExecutor) PrepareRequest(req *http.Request, auth *cliproxyauth.Au
 	}
 	apiKey, _ := claudeCreds(auth)
 	useAPIKey := auth != nil && (auth.AuthKind() == cliproxyauth.AuthKindAPIKey || (auth.Attributes != nil && strings.TrimSpace(auth.Attributes["api_key"]) != ""))
+	forceXAPIKey := auth != nil && auth.Attributes != nil && strings.EqualFold(strings.TrimSpace(auth.Attributes["anthropic_auth_scheme"]), "x-api-key")
 	isAnthropicBase := isAnthropicUpstreamURL(req.URL)
 	if strings.TrimSpace(apiKey) != "" {
-		if isAnthropicBase && useAPIKey {
+		if forceXAPIKey || (isAnthropicBase && useAPIKey) {
 			req.Header.Del("Authorization")
 			req.Header.Set("x-api-key", apiKey)
 		} else {
