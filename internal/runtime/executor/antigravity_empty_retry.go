@@ -18,7 +18,7 @@ import (
 // zero candidates/parts (zero output and zero reasoning tokens); clients such
 // as Pi treat the resulting empty "stop" completion as a legitimate end of
 // the agent turn, silently halting tool loops (ERM-121).
-const antigravityEmptyResponseMaxRetries = 2
+const antigravityEmptyResponseMaxRetries = 4
 
 // antigravityEmptyRetryDelay returns a short backoff before re-issuing a
 // request whose upstream completion came back empty.
