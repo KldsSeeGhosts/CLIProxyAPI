@@ -141,6 +141,14 @@ func (s *Service) registerModelsForAuthWithCache(ctx context.Context, a *coreaut
 	case "kimi":
 		models = registry.GetKimiModels()
 		models = applyExcludedModels(models, excluded)
+	case "cursor":
+		fetchCtx, fetchCancel := context.WithTimeout(ctx, 15*time.Second)
+		models = executor.FetchCursorModels(fetchCtx, a, s.cfg)
+		fetchCancel()
+		if len(models) == 0 {
+			models = registry.GetCursorModels()
+		}
+		models = applyExcludedModels(models, excluded)
 	case "xai":
 		models = registry.GetXAIModels()
 		if entry := s.resolveConfigXAIKey(a); entry != nil {
