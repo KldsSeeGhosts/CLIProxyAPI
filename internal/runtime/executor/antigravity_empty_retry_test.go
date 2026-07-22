@@ -168,6 +168,89 @@ func TestAntigravityExecutorExecuteStreamEmptyStreamExhaustion(t *testing.T) {
 	}
 }
 
+func TestAntigravitySemanticContinuationPayload(t *testing.T) {
+	const model = "gemini-3.6-flash-high"
+	payload := antigravitySemanticContinuationPayload(model)
+	if !antigravityResponseHasContent(payload) {
+		t.Fatalf("semantic continuation payload should contain reasoning: %s", payload)
+	}
+	if !strings.Contains(string(payload), model) || !strings.Contains(string(payload), "continue the unfinished turn") {
+		t.Fatalf("unexpected semantic continuation payload: %s", payload)
+	}
+	stream := antigravitySemanticContinuationStream(model)
+	if !strings.HasPrefix(string(stream), "data: ") || !strings.HasSuffix(string(stream), "\n\n") {
+		t.Fatalf("invalid semantic continuation SSE framing: %q", stream)
+	}
+}
+
+func TestAntigravityExecutorGemini36ConvertsEmptyStreamToSemanticContinuation(t *testing.T) {
+	var calls atomic.Int32
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		calls.Add(1)
+		w.Header().Set("Content-Type", "text/event-stream")
+		_, _ = w.Write([]byte("data: {\"response\":{\"candidates\":[],\"usageMetadata\":{\"promptTokenCount\":3,\"totalTokenCount\":3}}}\n\n"))
+	}))
+	defer server.Close()
+
+	payload := []byte(`{"model":"gemini-3.6-flash-high","contents":[{"role":"user","parts":[{"text":"hi"}]}]}`)
+	exec := NewAntigravityExecutor(&config.Config{RequestRetry: 1})
+	result, err := exec.ExecuteStream(context.Background(), antigravityEmptyRetryTestAuth(server.URL), cliproxyexecutor.Request{
+		Model:   "gemini-3.6-flash-high",
+		Payload: payload,
+	}, cliproxyexecutor.Options{
+		SourceFormat:    sdktranslator.FormatGemini,
+		ResponseFormat:  sdktranslator.FormatGemini,
+		Stream:          true,
+		OriginalRequest: payload,
+	})
+	if err != nil {
+		t.Fatalf("ExecuteStream() error = %v", err)
+	}
+	var output strings.Builder
+	for chunk := range result.Chunks {
+		if chunk.Err != nil {
+			t.Fatalf("stream chunk error: %v", chunk.Err)
+		}
+		output.Write(chunk.Payload)
+	}
+	if !strings.Contains(output.String(), "continue the unfinished turn") {
+		t.Fatalf("expected semantic continuation output, got %s", output.String())
+	}
+	if got := calls.Load(); got != 1 {
+		t.Fatalf("upstream calls = %d, want 1 (no blind replay)", got)
+	}
+}
+
+func TestAntigravityExecutorGemini36ConvertsEmptyCompletionToSemanticContinuation(t *testing.T) {
+	var calls atomic.Int32
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		calls.Add(1)
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"response":{"candidates":[],"usageMetadata":{"promptTokenCount":3,"totalTokenCount":3}}}`))
+	}))
+	defer server.Close()
+
+	payload := []byte(`{"model":"gemini-3.6-flash-high","contents":[{"role":"user","parts":[{"text":"hi"}]}]}`)
+	exec := NewAntigravityExecutor(&config.Config{RequestRetry: 1})
+	resp, err := exec.Execute(context.Background(), antigravityEmptyRetryTestAuth(server.URL), cliproxyexecutor.Request{
+		Model:   "gemini-3.6-flash-high",
+		Payload: payload,
+	}, cliproxyexecutor.Options{
+		SourceFormat:    sdktranslator.FormatGemini,
+		ResponseFormat:  sdktranslator.FormatGemini,
+		OriginalRequest: payload,
+	})
+	if err != nil {
+		t.Fatalf("Execute() error = %v", err)
+	}
+	if !strings.Contains(string(resp.Payload), "continue the unfinished turn") {
+		t.Fatalf("expected semantic continuation response, got %s", resp.Payload)
+	}
+	if got := calls.Load(); got != 1 {
+		t.Fatalf("upstream calls = %d, want 1 (no blind replay)", got)
+	}
+}
+
 func TestAntigravityExecutorExecuteRetriesEmptyCompletion(t *testing.T) {
 	var calls atomic.Int32
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {

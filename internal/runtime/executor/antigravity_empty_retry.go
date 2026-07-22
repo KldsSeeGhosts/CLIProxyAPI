@@ -4,6 +4,8 @@ import (
 	"bufio"
 	"bytes"
 	"context"
+	"encoding/json"
+	"fmt"
 	"io"
 	"strings"
 	"time"
@@ -24,6 +26,29 @@ const antigravityEmptyResponseMaxRetries = 4
 // request whose upstream completion came back empty.
 func antigravityEmptyRetryDelay(emptyRetries int) time.Duration {
 	return time.Duration(emptyRetries) * 400 * time.Millisecond
+}
+
+// Gemini 3.6 intermittently ends with either an empty success or a thought-only
+// STOP while intending another tool call. Blindly replaying the identical empty
+// request increases load and can cool the only Antigravity credential after
+// exhaustion. Convert the empty-success case into a semantic continuation STOP;
+// Pi's model-specific recovery hook then starts a fresh instructed continuation.
+func antigravityUsesSemanticContinuation(model string) bool {
+	return strings.HasPrefix(strings.ToLower(strings.TrimSpace(model)), "gemini-3.6-flash")
+}
+
+func antigravitySemanticContinuationPayload(model string) []byte {
+	modelJSON, _ := json.Marshal(model)
+	return []byte(fmt.Sprintf(`{"response":{"candidates":[{"content":{"role":"model","parts":[{"thought":true,"text":"The upstream completion was empty; continue the unfinished turn."}]},"finishReason":"STOP"}],"usageMetadata":{"promptTokenCount":0,"candidatesTokenCount":0,"thoughtsTokenCount":0,"totalTokenCount":0},"modelVersion":%s,"responseId":"cpa-semantic-continuation"}}`, modelJSON))
+}
+
+func antigravitySemanticContinuationStream(model string) []byte {
+	payload := antigravitySemanticContinuationPayload(model)
+	out := make([]byte, 0, len(payload)+8)
+	out = append(out, "data: "...)
+	out = append(out, payload...)
+	out = append(out, '\n', '\n')
+	return out
 }
 
 // antigravityResponseHasContent reports whether an Antigravity response
