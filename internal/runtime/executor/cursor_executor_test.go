@@ -6,6 +6,35 @@ import (
 	"testing"
 )
 
+func TestCursorTextDeltaJSONSeparatesThinkingFromVisibleContent(t *testing.T) {
+	thinking := cursorTextDeltaJSON("private reasoning", true)
+	if !json.Valid([]byte(thinking)) {
+		t.Fatalf("thinking delta is invalid JSON: %q", thinking)
+	}
+	if strings.Contains(thinking, "<think>") || strings.Contains(thinking, `"content"`) {
+		t.Fatalf("thinking leaked into visible content: %q", thinking)
+	}
+	var thinkingDelta map[string]string
+	if err := json.Unmarshal([]byte(thinking), &thinkingDelta); err != nil {
+		t.Fatalf("unmarshal thinking delta: %v", err)
+	}
+	if got := thinkingDelta["reasoning_content"]; got != "private reasoning" {
+		t.Fatalf("reasoning_content = %q, want private reasoning", got)
+	}
+
+	visible := cursorTextDeltaJSON("final answer", false)
+	var visibleDelta map[string]string
+	if err := json.Unmarshal([]byte(visible), &visibleDelta); err != nil {
+		t.Fatalf("unmarshal visible delta: %v", err)
+	}
+	if got := visibleDelta["content"]; got != "final answer" {
+		t.Fatalf("content = %q, want final answer", got)
+	}
+	if _, exists := visibleDelta["reasoning_content"]; exists {
+		t.Fatalf("visible delta unexpectedly contains reasoning_content: %q", visible)
+	}
+}
+
 func TestCursorToolCallDeltaJSONEscapesCursorIdentifiers(t *testing.T) {
 	exec := pendingMcpExec{
 		ToolCallId: "call-primary\ncall-secondary",
