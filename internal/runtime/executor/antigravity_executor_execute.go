@@ -87,6 +87,7 @@ func (e *AntigravityExecutor) Execute(ctx context.Context, auth *cliproxyauth.Au
 	httpClient := newAntigravityHTTPClient(ctx, e.cfg, auth, 0)
 	httpClient = reporter.TrackHTTPClient(httpClient)
 	attempts := antigravityRetryAttempts(auth, e.cfg)
+	emptyRetries := 0
 
 attemptLoop:
 	for attempt := 0; attempt < attempts; attempt++ {
@@ -229,6 +230,22 @@ attemptLoop:
 			// Success
 			if useCredits {
 				clearAntigravityCreditsFailureState(auth)
+			}
+			if !antigravityResponseHasContent(bodyBytes) {
+				// Transient upstream empty completion (zero candidates/parts):
+				// retry without consuming the configured attempt budget.
+				if emptyRetries < antigravityEmptyResponseMaxRetries {
+					emptyRetries++
+					delay := antigravityEmptyRetryDelay(emptyRetries)
+					log.Debugf("antigravity executor: empty completion for model %s, retrying in %s (empty retry %d/%d)", baseModel, delay, emptyRetries, antigravityEmptyResponseMaxRetries)
+					if errWait := antigravityWait(ctx, delay); errWait != nil {
+						return resp, errWait
+					}
+					attempt--
+					continue attemptLoop
+				}
+				err = statusErr{code: http.StatusBadGateway, msg: "antigravity executor: upstream returned an empty completion after retries"}
+				return resp, err
 			}
 			cacheAntigravityReasoningReplayFromResponse(ctx, replayScope, requestPayload, bodyBytes)
 			bodyBytes = e.resolveWebSearchGroundingURLs(ctx, auth, from, originalPayload, translated, bodyBytes)
