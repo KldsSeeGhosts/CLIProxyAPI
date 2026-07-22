@@ -82,6 +82,7 @@ func (e *AntigravityExecutor) ExecuteStream(ctx context.Context, auth *cliproxya
 	httpClient = reporter.TrackHTTPClient(httpClient)
 
 	attempts := antigravityRetryAttempts(auth, e.cfg)
+	emptyRetries := 0
 
 attemptLoop:
 	for attempt := 0; attempt < attempts; attempt++ {
@@ -235,6 +236,40 @@ attemptLoop:
 			// Stream success
 			if useCredits {
 				clearAntigravityCreditsFailureState(auth)
+			}
+			// Peek at the upstream SSE stream before forwarding anything to the
+			// client: a stream that ends with no content payload is the transient
+			// empty-completion case and is retried without consuming the
+			// configured attempt budget.
+			bufferedStream, streamHasContent, errPeek := peekAntigravityStreamContent(ctx, httpResp.Body)
+			if errPeek != nil {
+				if errClose := httpResp.Body.Close(); errClose != nil {
+					log.Errorf("antigravity executor: close response body error: %v", errClose)
+				}
+				helps.RecordAPIResponseError(ctx, e.cfg, errPeek)
+				err = errPeek
+				return nil, err
+			}
+			if !streamHasContent {
+				if errClose := httpResp.Body.Close(); errClose != nil {
+					log.Errorf("antigravity executor: close response body error: %v", errClose)
+				}
+				if emptyRetries < antigravityEmptyResponseMaxRetries {
+					emptyRetries++
+					delay := antigravityEmptyRetryDelay(emptyRetries)
+					log.Debugf("antigravity executor: empty stream for model %s, retrying in %s (empty retry %d/%d)", baseModel, delay, emptyRetries, antigravityEmptyResponseMaxRetries)
+					if errWait := antigravityWait(ctx, delay); errWait != nil {
+						return nil, errWait
+					}
+					attempt--
+					continue attemptLoop
+				}
+				err = statusErr{code: http.StatusBadGateway, msg: "antigravity executor: upstream returned an empty stream after retries"}
+				return nil, err
+			}
+			httpResp.Body = &antigravityPrependReadCloser{
+				reader: io.MultiReader(bytes.NewReader(bufferedStream), httpResp.Body),
+				closer: httpResp.Body,
 			}
 			replayAccumulator := newAntigravityReasoningReplayAccumulator(replayScope, requestPayload)
 			out := make(chan cliproxyexecutor.StreamChunk)
