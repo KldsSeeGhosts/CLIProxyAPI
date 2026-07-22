@@ -349,8 +349,8 @@ func (e *CursorExecutor) Execute(ctx context.Context, auth *cliproxyauth.Auth, r
 
 	id := "chatcmpl-" + uuid.New().String()[:28]
 	created := time.Now().Unix()
-	openaiResp := fmt.Sprintf(`{"id":"%s","object":"chat.completion","created":%d,"model":"%s","choices":[{"index":0,"message":{"role":"assistant","content":%s},"finish_reason":"stop"}],"usage":{"prompt_tokens":0,"completion_tokens":0,"total_tokens":0}}`,
-		id, created, parsed.Model, jsonString(fullText.String()))
+	openaiResp := fmt.Sprintf(`{"id":%s,"object":"chat.completion","created":%d,"model":%s,"choices":[{"index":0,"message":{"role":"assistant","content":%s},"finish_reason":"stop"}],"usage":{"prompt_tokens":0,"completion_tokens":0,"total_tokens":0}}`,
+		jsonString(id), created, jsonString(parsed.Model), jsonString(fullText.String()))
 
 	// Translate response back to source format if needed
 	result := []byte(openaiResp)
@@ -556,8 +556,8 @@ func (e *CursorExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.A
 		if finishReason != "" {
 			fr = finishReason
 		}
-		openaiJSON := fmt.Sprintf(`{"id":"%s","object":"chat.completion.chunk","created":%d,"model":"%s","choices":[{"index":0,"delta":%s,"finish_reason":%s}]}`,
-			chatId, created, parsed.Model, delta, fr)
+		openaiJSON := fmt.Sprintf(`{"id":%s,"object":"chat.completion.chunk","created":%d,"model":%s,"choices":[{"index":0,"delta":%s,"finish_reason":%s}]}`,
+			jsonString(chatId), created, jsonString(parsed.Model), delta, fr)
 		sseLine := []byte("data: " + openaiJSON + "\n")
 
 		if needsTranslate {
@@ -625,8 +625,7 @@ func (e *CursorExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.A
 					thinkingActive = false
 					sendChunkSwitchable(`{"content":"</think>"}`, "")
 				}
-				toolCallJSON := fmt.Sprintf(`{"tool_calls":[{"index":%d,"id":"%s","type":"function","function":{"name":"%s","arguments":%s}}]}`,
-					toolCallIndex, exec.ToolCallId, exec.ToolName, jsonString(exec.Args))
+				toolCallJSON := cursorToolCallDeltaJSON(toolCallIndex, exec)
 				toolCallIndex++
 				sendChunkSwitchable(toolCallJSON, "")
 				sendChunkSwitchable(`{}`, `"tool_calls"`)
@@ -721,8 +720,8 @@ func (e *CursorExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.A
 			inputTok, outputTok, inputTok+outputTok)
 		// Build the stop chunk with usage embedded in the choices array level
 		fr := `"stop"`
-		openaiJSON := fmt.Sprintf(`{"id":"%s","object":"chat.completion.chunk","created":%d,"model":"%s","choices":[{"index":0,"delta":{},"finish_reason":%s}],"usage":{"prompt_tokens":%d,"completion_tokens":%d,"total_tokens":%d}}`,
-			chatId, created, parsed.Model, fr, inputTok, outputTok, inputTok+outputTok)
+		openaiJSON := fmt.Sprintf(`{"id":%s,"object":"chat.completion.chunk","created":%d,"model":%s,"choices":[{"index":0,"delta":{},"finish_reason":%s}],"usage":{"prompt_tokens":%d,"completion_tokens":%d,"total_tokens":%d}}`,
+			jsonString(chatId), created, jsonString(parsed.Model), fr, inputTok, outputTok, inputTok+outputTok)
 		sseLine := []byte("data: " + openaiJSON + "\n")
 		if needsTranslate {
 			translated := sdktranslator.TranslateStream(ctx, to, from, req.Model, originalPayload, payload, sseLine, &streamParam)
@@ -1612,8 +1611,8 @@ func sseChunk(id string, created int64, model string, delta string, finishReason
 	}
 	// Note: the framework's WriteChunk adds "data: " prefix and "\n\n" suffix,
 	// so we only output the raw JSON here.
-	data := fmt.Sprintf(`{"id":"%s","object":"chat.completion.chunk","created":%d,"model":"%s","choices":[{"index":0,"delta":%s,"finish_reason":%s}]}`,
-		id, created, model, delta, fr)
+	data := fmt.Sprintf(`{"id":%s,"object":"chat.completion.chunk","created":%d,"model":%s,"choices":[{"index":0,"delta":%s,"finish_reason":%s}]}`,
+		jsonString(id), created, jsonString(model), delta, fr)
 	return cliproxyexecutor.StreamChunk{
 		Payload: []byte(data),
 	}
@@ -1622,6 +1621,16 @@ func sseChunk(id string, created int64, model string, delta string, finishReason
 func jsonString(s string) string {
 	b, _ := json.Marshal(s)
 	return string(b)
+}
+
+// cursorToolCallDeltaJSON builds an OpenAI tool-call delta without directly
+// interpolating Cursor-provided identifiers into JSON. Cursor can return MCP
+// call IDs containing control characters (including a literal newline); an
+// unescaped newline splits an SSE data event and makes the client parse two
+// unterminated JSON fragments.
+func cursorToolCallDeltaJSON(index int, exec pendingMcpExec) string {
+	return fmt.Sprintf(`{"tool_calls":[{"index":%d,"id":%s,"type":"function","function":{"name":%s,"arguments":%s}}]}`,
+		index, jsonString(exec.ToolCallId), jsonString(exec.ToolName), jsonString(exec.Args))
 }
 
 func decodeMcpArgsToJSON(args map[string][]byte) string {
