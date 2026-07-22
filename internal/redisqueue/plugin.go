@@ -64,6 +64,7 @@ func (p *usageQueuePlugin) HandleUsage(ctx context.Context, record coreusage.Rec
 		serviceTier = coreusage.ServiceTierFromContext(ctx)
 	}
 	responseServiceTier := strings.TrimSpace(record.ResponseServiceTier)
+	clientIdentity := coreusage.ClientIdentityFromContext(ctx)
 
 	usageDetail := coreusage.EnsureTokenBreakdownForProvider(record.Detail, record.Provider, record.ExecutorType)
 	tokens := tokenStats{
@@ -111,6 +112,8 @@ func (p *usageQueuePlugin) HandleUsage(ctx context.Context, record coreusage.Rec
 		ReasoningEffort:     reasoningEffort,
 		ServiceTier:         serviceTier,
 		ResponseServiceTier: responseServiceTier,
+		ClientOriginator:    clientIdentity.Originator,
+		ClientUserAgent:     clientIdentity.UserAgent,
 	})
 	if err != nil {
 		return
@@ -133,6 +136,8 @@ type queuedUsageDetail struct {
 	ReasoningEffort     string                   `json:"reasoning_effort"`
 	ServiceTier         string                   `json:"service_tier"`
 	ResponseServiceTier string                   `json:"response_service_tier,omitempty"`
+	ClientOriginator    string                   `json:"client_originator,omitempty"`
+	ClientUserAgent     string                   `json:"client_user_agent,omitempty"`
 }
 
 type requestDetail struct {

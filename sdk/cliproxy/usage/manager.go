@@ -61,21 +61,92 @@ type Failure struct {
 
 // Detail holds the token usage breakdown.
 type Detail struct {
-	InputTokens         int64
-	OutputTokens        int64
-	ReasoningTokens     int64
-	CachedTokens        int64
-	CacheReadTokens     int64
-	CacheCreationTokens int64
-	TotalTokens         int64
-	TokenBreakdown      TokenBreakdown
-	ResponseServiceTier string
+	InputTokens int64
+	// InputTokensIncludesCache indicates whether InputTokens includes cached input tokens.
+	// A nil value means the upstream semantics are unknown.
+	InputTokensIncludesCache *bool
+	OutputTokens             int64
+	ReasoningTokens          int64
+	CachedTokens             int64
+	CacheReadTokens          int64
+	CacheCreationTokens      int64
+	TotalTokens              int64
+	TokenBreakdown           TokenBreakdown
+	ResponseServiceTier      string
 }
 
 type requestedModelAliasContextKey struct{}
 type reasoningEffortContextKey struct{}
 type serviceTierContextKey struct{}
 type generateContextKey struct{}
+type clientIdentityContextKey struct{}
+
+// ClientIdentity contains the bounded metadata-only client identity captured
+// from an inbound HTTP request. It never contains arbitrary request headers.
+type ClientIdentity struct {
+	Originator string
+	UserAgent  string
+}
+
+const (
+	maxClientOriginatorBytes = 128
+	maxClientUserAgentBytes  = 512
+)
+
+// WithClientIdentity stores sanitized inbound originator and User-Agent values
+// for usage sinks. Empty values leave the context unchanged.
+func WithClientIdentity(ctx context.Context, originator, userAgent string) context.Context {
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	identity := ClientIdentity{
+		Originator: sanitizeClientIdentityValue(originator, maxClientOriginatorBytes),
+		UserAgent:  sanitizeClientIdentityValue(userAgent, maxClientUserAgentBytes),
+	}
+	if identity.Originator == "" && identity.UserAgent == "" {
+		return ctx
+	}
+	return context.WithValue(ctx, clientIdentityContextKey{}, identity)
+}
+
+// ClientIdentityFromContext returns the sanitized client identity stored in ctx.
+func ClientIdentityFromContext(ctx context.Context) ClientIdentity {
+	if ctx == nil {
+		return ClientIdentity{}
+	}
+	identity, _ := ctx.Value(clientIdentityContextKey{}).(ClientIdentity)
+	return identity
+}
+
+func sanitizeClientIdentityValue(value string, maxBytes int) string {
+	value = strings.TrimSpace(value)
+	if value == "" || maxBytes <= 0 {
+		return ""
+	}
+	var builder strings.Builder
+	lastSpace := false
+	for _, r := range value {
+		if r < 0x20 || r == 0x7f {
+			if r != '\t' && r != '\n' && r != '\r' {
+				continue
+			}
+			r = ' '
+		}
+		if r == ' ' {
+			if lastSpace {
+				continue
+			}
+			lastSpace = true
+		} else {
+			lastSpace = false
+		}
+		if builder.Len()+len(string(r)) > maxBytes {
+			break
+		}
+		builder.WriteRune(r)
+	}
+	return strings.TrimSpace(builder.String())
+}
 
 // WithRequestedModelAlias stores the client-requested model name for usage sinks.
 func WithRequestedModelAlias(ctx context.Context, alias string) context.Context {

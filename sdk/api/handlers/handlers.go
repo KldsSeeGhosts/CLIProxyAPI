@@ -578,6 +578,10 @@ func (h *BaseAPIHandler) GetContextWithCancel(handler interfaces.APIHandler, c *
 	if c != nil && c.Request != nil {
 		requestCtx = c.Request.Context()
 	}
+	if requestCtx != nil {
+		identity := coreusage.ClientIdentityFromContext(requestCtx)
+		parentCtx = coreusage.WithClientIdentity(parentCtx, identity.Originator, identity.UserAgent)
+	}
 
 	if requestCtx != nil && logging.GetRequestID(parentCtx) == "" {
 		if requestID := logging.GetRequestID(requestCtx); requestID != "" {

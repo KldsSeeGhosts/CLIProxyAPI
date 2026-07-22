@@ -104,6 +104,26 @@ func TestUsageQueuePluginNormalizesDirectSDKUsageByProvider(t *testing.T) {
 	}
 }
 
+func TestUsageQueuePluginPayloadIncludesOptionalClientIdentity(t *testing.T) {
+	withEnabledQueue(t, func() {
+		ctx := coreusage.WithClientIdentity(context.Background(), "Codex Desktop", "codex-desktop/0.144.3")
+		(&usageQueuePlugin{}).HandleUsage(ctx, coreusage.Record{Provider: "openai", Model: "gpt-5.4"})
+
+		payload := popSinglePayload(t)
+		requireStringField(t, payload, "client_originator", "Codex Desktop")
+		requireStringField(t, payload, "client_user_agent", "codex-desktop/0.144.3")
+	})
+}
+
+func TestUsageQueuePluginOmitsMissingClientIdentity(t *testing.T) {
+	withEnabledQueue(t, func() {
+		(&usageQueuePlugin{}).HandleUsage(context.Background(), coreusage.Record{Provider: "openai", Model: "gpt-5.4"})
+		payload := popSinglePayload(t)
+		requireMissingField(t, payload, "client_originator")
+		requireMissingField(t, payload, "client_user_agent")
+	})
+}
+
 func TestUsageQueuePluginPayloadIncludesGenerateFalse(t *testing.T) {
 	withEnabledQueue(t, func() {
 		ctx := internallogging.WithResponseStatusHolder(context.Background())
