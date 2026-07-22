@@ -85,6 +85,10 @@ func (e *KimiExecutor) HttpRequest(ctx context.Context, auth *cliproxyauth.Auth,
 func (e *KimiExecutor) Execute(ctx context.Context, auth *cliproxyauth.Auth, req cliproxyexecutor.Request, opts cliproxyexecutor.Options) (resp cliproxyexecutor.Response, err error) {
 	from := opts.SourceFormat
 	if from.String() == "claude" {
+		req.Payload, err = normalizeKimiClaudeToolReferences(req.Payload)
+		if err != nil {
+			return resp, err
+		}
 		auth.Attributes["base_url"] = kimiauth.KimiAPIBaseURL
 		return e.ClaudeExecutor.Execute(ctx, auth, req, opts)
 	}
@@ -195,6 +199,10 @@ func (e *KimiExecutor) Execute(ctx context.Context, auth *cliproxyauth.Auth, req
 func (e *KimiExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.Auth, req cliproxyexecutor.Request, opts cliproxyexecutor.Options) (_ *cliproxyexecutor.StreamResult, err error) {
 	from := opts.SourceFormat
 	if from.String() == "claude" {
+		req.Payload, err = normalizeKimiClaudeToolReferences(req.Payload)
+		if err != nil {
+			return nil, err
+		}
 		auth.Attributes["base_url"] = kimiauth.KimiAPIBaseURL
 		return e.ClaudeExecutor.ExecuteStream(ctx, auth, req, opts)
 	}
@@ -336,8 +344,86 @@ func (e *KimiExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.Aut
 
 // CountTokens estimates token count for Kimi requests.
 func (e *KimiExecutor) CountTokens(ctx context.Context, auth *cliproxyauth.Auth, req cliproxyexecutor.Request, opts cliproxyexecutor.Options) (cliproxyexecutor.Response, error) {
+	var err error
+	req.Payload, err = normalizeKimiClaudeToolReferences(req.Payload)
+	if err != nil {
+		return cliproxyexecutor.Response{}, err
+	}
 	auth.Attributes["base_url"] = kimiauth.KimiAPIBaseURL
 	return e.ClaudeExecutor.CountTokens(ctx, auth, req, opts)
+}
+
+// normalizeKimiClaudeToolReferences converts Claude Code's deferred-tool references
+// into text blocks because Kimi's Anthropic-compatible endpoint rejects the
+// tool_reference content type.
+func normalizeKimiClaudeToolReferences(body []byte) ([]byte, error) {
+	if len(body) == 0 || !gjson.ValidBytes(body) {
+		return body, nil
+	}
+
+	messages := gjson.GetBytes(body, "messages")
+	if !messages.IsArray() {
+		return body, nil
+	}
+
+	out := body
+	for messageIndex, message := range messages.Array() {
+		content := message.Get("content")
+		if !content.IsArray() {
+			continue
+		}
+		for contentIndex, block := range content.Array() {
+			blockPath := fmt.Sprintf("messages.%d.content.%d", messageIndex, contentIndex)
+			switch block.Get("type").String() {
+			case "tool_reference":
+				var err error
+				out, err = replaceKimiToolReference(out, blockPath, block)
+				if err != nil {
+					return body, err
+				}
+			case "tool_result":
+				nestedContent := block.Get("content")
+				if !nestedContent.IsArray() {
+					continue
+				}
+				for nestedIndex, nestedBlock := range nestedContent.Array() {
+					if nestedBlock.Get("type").String() != "tool_reference" {
+						continue
+					}
+					path := fmt.Sprintf("%s.content.%d", blockPath, nestedIndex)
+					var err error
+					out, err = replaceKimiToolReference(out, path, nestedBlock)
+					if err != nil {
+						return body, err
+					}
+				}
+			}
+		}
+	}
+	return out, nil
+}
+
+func replaceKimiToolReference(body []byte, path string, reference gjson.Result) ([]byte, error) {
+	text := "Tool reference"
+	if toolName := strings.TrimSpace(reference.Get("tool_name").String()); toolName != "" {
+		text += ": " + toolName
+	}
+
+	replacement, err := sjson.SetBytes([]byte(`{"type":"text"}`), "text", text)
+	if err != nil {
+		return body, fmt.Errorf("kimi executor: failed to convert tool reference: %w", err)
+	}
+	if cacheControl := reference.Get("cache_control"); cacheControl.Exists() {
+		replacement, err = sjson.SetRawBytes(replacement, "cache_control", []byte(cacheControl.Raw))
+		if err != nil {
+			return body, fmt.Errorf("kimi executor: failed to preserve tool reference cache control: %w", err)
+		}
+	}
+	out, err := sjson.SetRawBytes(body, path, replacement)
+	if err != nil {
+		return body, fmt.Errorf("kimi executor: failed to replace tool reference: %w", err)
+	}
+	return out, nil
 }
 
 func normalizeKimiToolMessageLinks(body []byte) ([]byte, error) {
