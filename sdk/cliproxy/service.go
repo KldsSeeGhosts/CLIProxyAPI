@@ -570,7 +570,10 @@ func newDefaultAuthManager() *sdkAuth.Manager {
 		sdkAuth.GetTokenStore(),
 		sdkAuth.NewCodexAuthenticator(),
 		sdkAuth.NewClaudeAuthenticator(),
+		sdkAuth.NewKimiAuthenticator(),
+		sdkAuth.NewAntigravityAuthenticator(),
 		sdkAuth.NewXAIAuthenticator(),
+		sdkAuth.NewCursorAuthenticator(),
 	)
 }
 
@@ -1243,6 +1246,8 @@ func (s *Service) registerExecutorForAuth(a *coreauth.Auth, forceReplace bool) {
 		s.coreManager.RegisterExecutor(executor.NewKimiExecutor(s.cfg))
 	case "xai":
 		s.coreManager.RegisterExecutor(executor.NewXAIAutoExecutor(s.cfg))
+	case "cursor":
+		s.coreManager.RegisterExecutor(executor.NewCursorExecutor(s.cfg))
 	default:
 		providerKey := strings.ToLower(strings.TrimSpace(a.Provider))
 		if providerKey == "" {
@@ -2792,6 +2797,11 @@ func (s *Service) registerModelsForAuthWithCache(ctx context.Context, a *coreaut
 		models = applyExcludedModels(models, excluded)
 	case "kimi":
 		models = registry.GetKimiModels()
+		models = applyExcludedModels(models, excluded)
+	case "cursor":
+		fetchCtx, fetchCancel := context.WithTimeout(context.Background(), 15*time.Second)
+		defer fetchCancel()
+		models = executor.FetchCursorModels(fetchCtx, a, s.cfg)
 		models = applyExcludedModels(models, excluded)
 	case "xai":
 		models = registry.GetXAIModels()
