@@ -599,32 +599,15 @@ func (e *CursorExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.A
 	go func() {
 		var resumeOutCh chan cliproxyexecutor.StreamChunk
 		_ = resumeOutCh
-		thinkingActive := false
 		toolCallIndex := 0
 		usage := &cursorTokenUsage{}
 		usage.setInputEstimate(len(payload))
 
 		streamErr := processH2SessionFrames(sessionCtx, stream, params.BlobStore, params.McpTools,
 			func(text string, isThinking bool) {
-				if isThinking {
-					if !thinkingActive {
-						thinkingActive = true
-						sendChunkSwitchable(`{"role":"assistant","content":"<think>"}`, "")
-					}
-					sendChunkSwitchable(fmt.Sprintf(`{"content":%s}`, jsonString(text)), "")
-				} else {
-					if thinkingActive {
-						thinkingActive = false
-						sendChunkSwitchable(`{"content":"</think>"}`, "")
-					}
-					sendChunkSwitchable(fmt.Sprintf(`{"content":%s}`, jsonString(text)), "")
-				}
+				sendChunkSwitchable(cursorTextDeltaJSON(text, isThinking), "")
 			},
 			func(exec pendingMcpExec) {
-				if thinkingActive {
-					thinkingActive = false
-					sendChunkSwitchable(`{"content":"</think>"}`, "")
-				}
 				toolCallJSON := cursorToolCallDeltaJSON(toolCallIndex, exec)
 				toolCallIndex++
 				sendChunkSwitchable(toolCallJSON, "")
@@ -711,9 +694,6 @@ func (e *CursorExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.A
 			}
 		}
 
-		if thinkingActive {
-			sendChunkSwitchable(`{"content":"</think>"}`, "")
-		}
 		// Include token usage in the final stop chunk
 		inputTok, outputTok := usage.get()
 		stopDelta := fmt.Sprintf(`{},"usage":{"prompt_tokens":%d,"completion_tokens":%d,"total_tokens":%d}`,
@@ -1621,6 +1601,18 @@ func sseChunk(id string, created int64, model string, delta string, finishReason
 func jsonString(s string) string {
 	b, _ := json.Marshal(s)
 	return string(b)
+}
+
+// cursorTextDeltaJSON keeps Cursor reasoning on the OpenAI-compatible
+// reasoning_content channel instead of leaking it into visible text wrapped in
+// literal <think> tags. Pi and protocol translators can then treat reasoning as
+// a distinct content block.
+func cursorTextDeltaJSON(text string, isThinking bool) string {
+	field := "content"
+	if isThinking {
+		field = "reasoning_content"
+	}
+	return fmt.Sprintf(`{"%s":%s}`, field, jsonString(text))
 }
 
 // cursorToolCallDeltaJSON builds an OpenAI tool-call delta without directly
