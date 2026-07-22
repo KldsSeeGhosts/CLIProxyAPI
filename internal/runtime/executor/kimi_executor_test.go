@@ -16,6 +16,65 @@ import (
 	"github.com/tidwall/gjson"
 )
 
+func TestNormalizeKimiClaudeToolReferences_ConvertsNestedAndTopLevelBlocks(t *testing.T) {
+	body := []byte(`{
+		"messages":[
+			{"role":"user","content":[
+				{"type":"tool_result","tool_use_id":"tool_123","content":[
+					{"type":"tool_reference","tool_name":"WebFetch"},
+					{"type":"text","text":"keep me"}
+				]},
+				{"type":"tool_reference","tool_name":"WebSearch","cache_control":{"type":"ephemeral"}}
+			]}
+		]
+	}`)
+
+	out, err := normalizeKimiClaudeToolReferences(body)
+	if err != nil {
+		t.Fatalf("normalizeKimiClaudeToolReferences() error = %v", err)
+	}
+
+	if got := gjson.GetBytes(out, "messages.0.content.0.tool_use_id").String(); got != "tool_123" {
+		t.Fatalf("tool_use_id = %q, want %q", got, "tool_123")
+	}
+	if got := gjson.GetBytes(out, "messages.0.content.0.content.0.type").String(); got != "text" {
+		t.Fatalf("nested reference type = %q, want text", got)
+	}
+	if got := gjson.GetBytes(out, "messages.0.content.0.content.0.text").String(); got != "Tool reference: WebFetch" {
+		t.Fatalf("nested reference text = %q", got)
+	}
+	if got := gjson.GetBytes(out, "messages.0.content.0.content.1.text").String(); got != "keep me" {
+		t.Fatalf("ordinary nested text = %q, want keep me", got)
+	}
+	if got := gjson.GetBytes(out, "messages.0.content.1.type").String(); got != "text" {
+		t.Fatalf("top-level reference type = %q, want text", got)
+	}
+	if got := gjson.GetBytes(out, "messages.0.content.1.text").String(); got != "Tool reference: WebSearch" {
+		t.Fatalf("top-level reference text = %q", got)
+	}
+	if got := gjson.GetBytes(out, "messages.0.content.1.cache_control.type").String(); got != "ephemeral" {
+		t.Fatalf("cache_control.type = %q, want ephemeral", got)
+	}
+	if gjson.GetBytes(out, `messages.#(content.#(type=="tool_reference"))`).Exists() {
+		t.Fatalf("tool_reference block remained: %s", out)
+	}
+}
+
+func TestNormalizeKimiClaudeToolReferences_LeavesInvalidAndUnrelatedPayloadsUnchanged(t *testing.T) {
+	for _, body := range [][]byte{
+		[]byte("not-json"),
+		[]byte(`{"messages":[{"role":"user","content":[{"type":"text","text":"hello"}]}]}`),
+	} {
+		out, err := normalizeKimiClaudeToolReferences(body)
+		if err != nil {
+			t.Fatalf("normalizeKimiClaudeToolReferences() error = %v", err)
+		}
+		if string(out) != string(body) {
+			t.Fatalf("payload changed: got %s, want %s", out, body)
+		}
+	}
+}
+
 func TestNewKimiExecutorInitializesDelegatedClaudeConfig(t *testing.T) {
 	cfg := &config.Config{SDKConfig: config.SDKConfig{RequestLog: true}}
 	executor := NewKimiExecutor(cfg)
