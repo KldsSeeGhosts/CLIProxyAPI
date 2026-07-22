@@ -61,15 +61,18 @@ type Failure struct {
 
 // Detail holds the token usage breakdown.
 type Detail struct {
-	InputTokens         int64
-	OutputTokens        int64
-	ReasoningTokens     int64
-	CachedTokens        int64
-	CacheReadTokens     int64
-	CacheCreationTokens int64
-	TotalTokens         int64
-	TokenBreakdown      TokenBreakdown
-	ResponseServiceTier string
+	InputTokens int64
+	// InputTokensIncludesCache indicates whether InputTokens includes cached input tokens.
+	// A nil value means the upstream semantics are unknown.
+	InputTokensIncludesCache *bool
+	OutputTokens             int64
+	ReasoningTokens          int64
+	CachedTokens             int64
+	CacheReadTokens          int64
+	CacheCreationTokens      int64
+	TotalTokens              int64
+	TokenBreakdown           TokenBreakdown
+	ResponseServiceTier      string
 }
 
 type requestedModelAliasContextKey struct{}

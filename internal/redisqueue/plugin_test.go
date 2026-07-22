@@ -561,3 +561,16 @@ func requireHeaderField(t *testing.T, payload map[string]json.RawMessage, field,
 		}
 	}
 }
+
+func TestUsageQueuePluginSerializesOptionalInputTokenCacheSemantics(t *testing.T) {
+	withEnabledQueue(t, func() {
+		value := true
+		(&usageQueuePlugin{}).HandleUsage(context.Background(), coreusage.Record{
+			Provider: "openai",
+			Model:    "gpt-5.4",
+			Detail:   coreusage.Detail{InputTokensIncludesCache: &value},
+		})
+		payload := popSinglePayload(t)
+		requireTokensBoolField(t, payload, "input_tokens_includes_cache", true)
+	})
+}
