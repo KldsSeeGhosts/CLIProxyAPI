@@ -581,9 +581,10 @@ func parseOpenAIStyleUsageNode(usageNode gjson.Result) usage.Detail {
 		outputNode = usageNode.Get("output_tokens")
 	}
 	detail := usage.Detail{
-		InputTokens:  inputNode.Int(),
-		OutputTokens: outputNode.Int(),
-		TotalTokens:  usageNode.Get("total_tokens").Int(),
+		InputTokens:              inputNode.Int(),
+		InputTokensIncludesCache: boolPtr(true),
+		OutputTokens:             outputNode.Int(),
+		TotalTokens:              usageNode.Get("total_tokens").Int(),
 	}
 	cached := usageNode.Get("prompt_tokens_details.cached_tokens")
 	if !cached.Exists() {
@@ -655,11 +656,12 @@ func parseClaudeUsageNode(usageNode gjson.Result) usage.Detail {
 	cacheReadTokens := usageNode.Get("cache_read_input_tokens").Int()
 	cacheCreationTokens := usageNode.Get("cache_creation_input_tokens").Int()
 	detail := usage.Detail{
-		InputTokens:         usageNode.Get("input_tokens").Int(),
-		OutputTokens:        usageNode.Get("output_tokens").Int(),
-		CachedTokens:        cacheReadTokens,
-		CacheReadTokens:     cacheReadTokens,
-		CacheCreationTokens: cacheCreationTokens,
+		InputTokens:              usageNode.Get("input_tokens").Int(),
+		InputTokensIncludesCache: boolPtr(false),
+		OutputTokens:             usageNode.Get("output_tokens").Int(),
+		CachedTokens:             cacheReadTokens,
+		CacheReadTokens:          cacheReadTokens,
+		CacheCreationTokens:      cacheCreationTokens,
 	}
 	if detail.CachedTokens == 0 {
 		detail.CachedTokens = detail.CacheCreationTokens
@@ -671,12 +673,13 @@ func parseClaudeUsageNode(usageNode gjson.Result) usage.Detail {
 func parseGeminiFamilyUsageDetail(node gjson.Result) usage.Detail {
 	cachedTokens := node.Get("cachedContentTokenCount").Int()
 	detail := usage.Detail{
-		InputTokens:     node.Get("promptTokenCount").Int(),
-		OutputTokens:    node.Get("candidatesTokenCount").Int(),
-		ReasoningTokens: node.Get("thoughtsTokenCount").Int(),
-		TotalTokens:     node.Get("totalTokenCount").Int(),
-		CachedTokens:    cachedTokens,
-		CacheReadTokens: cachedTokens,
+		InputTokens:              node.Get("promptTokenCount").Int(),
+		InputTokensIncludesCache: boolPtr(true),
+		OutputTokens:             node.Get("candidatesTokenCount").Int(),
+		ReasoningTokens:          node.Get("thoughtsTokenCount").Int(),
+		TotalTokens:              node.Get("totalTokenCount").Int(),
+		CachedTokens:             cachedTokens,
+		CacheReadTokens:          cachedTokens,
 	}
 	if detail.TotalTokens == 0 {
 		detail.TotalTokens = detail.InputTokens + detail.OutputTokens + detail.ReasoningTokens
@@ -705,6 +708,10 @@ func parseInteractionsUsageDetail(node gjson.Result) usage.Detail {
 		}
 	}
 	return detail
+}
+
+func boolPtr(value bool) *bool {
+	return &value
 }
 
 func hasUsageDetail(detail usage.Detail) bool {
