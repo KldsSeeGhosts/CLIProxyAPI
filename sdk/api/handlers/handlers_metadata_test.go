@@ -8,6 +8,8 @@ import (
 	"github.com/gin-gonic/gin"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/logging"
 	coreexecutor "github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/executor"
+	coreusage "github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/usage"
+	sdkconfig "github.com/router-for-me/CLIProxyAPI/v7/sdk/config"
 	"golang.org/x/net/context"
 )
 
@@ -135,5 +137,20 @@ func TestSetGenerateMetadataHonorsExplicitFalse(t *testing.T) {
 
 	if got := meta[coreexecutor.GenerateMetadataKey]; got != false {
 		t.Fatalf("GenerateMetadataKey = %v, want false", got)
+	}
+}
+
+func TestGetContextWithCancelPreservesClientIdentity(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	request := httptest.NewRequest("POST", "/v1/responses", nil)
+	request = request.WithContext(coreusage.WithClientIdentity(request.Context(), "pi", "pi/0.80.6"))
+	ginContext, _ := gin.CreateTestContext(httptest.NewRecorder())
+	ginContext.Request = request
+
+	ctx, cancel := (&BaseAPIHandler{Cfg: &sdkconfig.SDKConfig{}}).GetContextWithCancel(nil, ginContext, context.Background())
+	defer cancel()
+	identity := coreusage.ClientIdentityFromContext(ctx)
+	if identity.Originator != "pi" || identity.UserAgent != "pi/0.80.6" {
+		t.Fatalf("identity = %#v", identity)
 	}
 }

@@ -46,6 +46,7 @@ import (
 	sdkAuth "github.com/router-for-me/CLIProxyAPI/v7/sdk/auth"
 	"github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/auth"
 	coreexecutor "github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/executor"
+	coreusage "github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/usage"
 	log "github.com/sirupsen/logrus"
 	"golang.org/x/net/http2"
 	"gopkg.in/yaml.v3"
@@ -315,6 +316,7 @@ func NewServer(cfg *config.Config, authManager *auth.Manager, accessManager *sdk
 	}
 
 	engine.Use(corsMiddleware())
+	engine.Use(clientIdentityMiddleware())
 	wd, err := os.Getwd()
 	if err != nil {
 		wd = configFilePath
@@ -409,6 +411,17 @@ func NewServer(cfg *config.Config, authManager *auth.Manager, accessManager *sdk
 	}
 
 	return s
+}
+
+func clientIdentityMiddleware() gin.HandlerFunc {
+	return func(c *gin.Context) {
+		if c == nil || c.Request == nil {
+			return
+		}
+		ctx := coreusage.WithClientIdentity(c.Request.Context(), c.GetHeader("Originator"), c.GetHeader("User-Agent"))
+		c.Request = c.Request.WithContext(ctx)
+		c.Next()
+	}
 }
 
 func (s *Server) homeHeartbeatMiddleware() gin.HandlerFunc {
