@@ -1307,6 +1307,9 @@ type UsageFailure struct {
 type UsageDetail struct {
 	// InputTokens is the prompt or input token count.
 	InputTokens int64
+	// InputTokensIncludesCache indicates whether InputTokens includes cached input tokens.
+	// A nil value means the upstream semantics are unknown.
+	InputTokensIncludesCache *bool
 	// OutputTokens is the completion or output token count.
 	OutputTokens int64
 	// ReasoningTokens is the reasoning token count.

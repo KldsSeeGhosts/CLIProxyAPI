@@ -625,3 +625,22 @@ type TestUsageExecutor struct{}
 func (TestUsageExecutor) Identifier() string {
 	return "test-provider"
 }
+
+func TestParseInputTokenCacheSemantics(t *testing.T) {
+	openAI := ParseOpenAIUsage([]byte("{\"usage\":{\"input_tokens\":10,\"output_tokens\":2}}"))
+	if openAI.InputTokensIncludesCache == nil || !*openAI.InputTokensIncludesCache {
+		t.Fatalf("OpenAI InputTokensIncludesCache = %v, want true", openAI.InputTokensIncludesCache)
+	}
+	claude := ParseClaudeUsage([]byte("{\"usage\":{\"input_tokens\":10,\"output_tokens\":2}}"))
+	if claude.InputTokensIncludesCache == nil || *claude.InputTokensIncludesCache {
+		t.Fatalf("Claude InputTokensIncludesCache = %v, want false", claude.InputTokensIncludesCache)
+	}
+	gemini := ParseGeminiUsage([]byte("{\"usageMetadata\":{\"promptTokenCount\":10,\"candidatesTokenCount\":2,\"cachedContentTokenCount\":3}}"))
+	if gemini.InputTokensIncludesCache == nil || !*gemini.InputTokensIncludesCache {
+		t.Fatalf("Gemini InputTokensIncludesCache = %v, want true", gemini.InputTokensIncludesCache)
+	}
+	unknown := ParseInteractionsUsage([]byte("{\"usage\":{\"input_tokens\":10,\"output_tokens\":2}}"))
+	if unknown.InputTokensIncludesCache != nil {
+		t.Fatalf("unknown InputTokensIncludesCache = %v, want nil", unknown.InputTokensIncludesCache)
+	}
+}
