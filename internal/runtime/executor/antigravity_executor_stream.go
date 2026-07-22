@@ -254,18 +254,27 @@ attemptLoop:
 				if errClose := httpResp.Body.Close(); errClose != nil {
 					log.Errorf("antigravity executor: close response body error: %v", errClose)
 				}
-				if emptyRetries < antigravityEmptyResponseMaxRetries {
-					emptyRetries++
-					delay := antigravityEmptyRetryDelay(emptyRetries)
-					log.Debugf("antigravity executor: empty stream for model %s, retrying in %s (empty retry %d/%d)", baseModel, delay, emptyRetries, antigravityEmptyResponseMaxRetries)
-					if errWait := antigravityWait(ctx, delay); errWait != nil {
-						return nil, errWait
+				if antigravityUsesSemanticContinuation(baseModel) {
+					// Do not replay Gemini 3.6's identical empty request. Emit a
+					// reasoning-only STOP that the Pi semantic recovery hook turns
+					// into a fresh, explicitly instructed continuation turn.
+					log.Warnf("antigravity executor: empty stream for model %s; emitting semantic continuation marker", baseModel)
+					bufferedStream = antigravitySemanticContinuationStream(baseModel)
+					httpResp.Body = io.NopCloser(bytes.NewReader(nil))
+				} else {
+					if emptyRetries < antigravityEmptyResponseMaxRetries {
+						emptyRetries++
+						delay := antigravityEmptyRetryDelay(emptyRetries)
+						log.Debugf("antigravity executor: empty stream for model %s, retrying in %s (empty retry %d/%d)", baseModel, delay, emptyRetries, antigravityEmptyResponseMaxRetries)
+						if errWait := antigravityWait(ctx, delay); errWait != nil {
+							return nil, errWait
+						}
+						attempt--
+						continue attemptLoop
 					}
-					attempt--
-					continue attemptLoop
+					err = statusErr{code: http.StatusBadGateway, msg: "antigravity executor: upstream returned an empty stream after retries"}
+					return nil, err
 				}
-				err = statusErr{code: http.StatusBadGateway, msg: "antigravity executor: upstream returned an empty stream after retries"}
-				return nil, err
 			}
 			httpResp.Body = &antigravityPrependReadCloser{
 				reader: io.MultiReader(bytes.NewReader(bufferedStream), httpResp.Body),
