@@ -232,20 +232,28 @@ attemptLoop:
 				clearAntigravityCreditsFailureState(auth)
 			}
 			if !antigravityResponseHasContent(bodyBytes) {
-				// Transient upstream empty completion (zero candidates/parts):
-				// retry without consuming the configured attempt budget.
-				if emptyRetries < antigravityEmptyResponseMaxRetries {
-					emptyRetries++
-					delay := antigravityEmptyRetryDelay(emptyRetries)
-					log.Debugf("antigravity executor: empty completion for model %s, retrying in %s (empty retry %d/%d)", baseModel, delay, emptyRetries, antigravityEmptyResponseMaxRetries)
-					if errWait := antigravityWait(ctx, delay); errWait != nil {
-						return resp, errWait
+				if antigravityUsesSemanticContinuation(baseModel) {
+					// Gemini 3.6's empty success is semantically the same failure as
+					// its thought-only STOP. Return a recoverable reasoning-only STOP
+					// instead of replaying the identical request or cooling the auth.
+					log.Warnf("antigravity executor: empty completion for model %s; emitting semantic continuation marker", baseModel)
+					bodyBytes = antigravitySemanticContinuationPayload(baseModel)
+				} else {
+					// Transient upstream empty completion (zero candidates/parts):
+					// retry without consuming the configured attempt budget.
+					if emptyRetries < antigravityEmptyResponseMaxRetries {
+						emptyRetries++
+						delay := antigravityEmptyRetryDelay(emptyRetries)
+						log.Debugf("antigravity executor: empty completion for model %s, retrying in %s (empty retry %d/%d)", baseModel, delay, emptyRetries, antigravityEmptyResponseMaxRetries)
+						if errWait := antigravityWait(ctx, delay); errWait != nil {
+							return resp, errWait
+						}
+						attempt--
+						continue attemptLoop
 					}
-					attempt--
-					continue attemptLoop
+					err = statusErr{code: http.StatusBadGateway, msg: "antigravity executor: upstream returned an empty completion after retries"}
+					return resp, err
 				}
-				err = statusErr{code: http.StatusBadGateway, msg: "antigravity executor: upstream returned an empty completion after retries"}
-				return resp, err
 			}
 			cacheAntigravityReasoningReplayFromResponse(ctx, replayScope, requestPayload, bodyBytes)
 			bodyBytes = e.resolveWebSearchGroundingURLs(ctx, auth, from, originalPayload, translated, bodyBytes)
