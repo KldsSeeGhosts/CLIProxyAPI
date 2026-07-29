@@ -9,7 +9,7 @@ import (
 const (
 	codexBuiltinImage15ModelID      = "gpt-image-1.5"
 	codexBuiltinImageModelID        = "gpt-image-2"
-	kimiBuiltinK32ModelID           = "kimi-k3.2"
+	kimiBuiltinK3256KModelID        = "kimi-k3-256k"
 	xaiBuiltinImageModelID          = "grok-imagine-image"
 	xaiBuiltinImageQualityModelID   = "grok-imagine-image-quality"
 	xaiBuiltinVideoModelID          = "grok-imagine-video"
@@ -121,7 +121,7 @@ func WithCodexBuiltins(models []*ModelInfo) []*ModelInfo {
 // WithKimiBuiltins injects Kimi models that must remain available when the
 // remotely refreshed catalog has not caught up with the provider release.
 func WithKimiBuiltins(models []*ModelInfo) []*ModelInfo {
-	return upsertModelInfos(models, kimiBuiltinK32ModelInfo())
+	return upsertModelInfos(models, kimiBuiltinK3256KModelInfo())
 }
 
 // WithXAIBuiltins injects hard-coded xAI image/video model definitions that should
@@ -162,17 +162,17 @@ func codexBuiltinImageModelInfo() *ModelInfo {
 	}
 }
 
-func kimiBuiltinK32ModelInfo() *ModelInfo {
+func kimiBuiltinK3256KModelInfo() *ModelInfo {
 	return &ModelInfo{
-		ID:                  kimiBuiltinK32ModelID,
+		ID:                  kimiBuiltinK3256KModelID,
 		Object:              "model",
 		Created:             1785288992,
 		OwnedBy:             "moonshot",
 		Type:                "kimi",
-		DisplayName:         "Kimi K3.2",
-		Description:         "Kimi K3.2 - Moonshot AI's 256K-context K3.2 model with half the K3 usage rate",
+		DisplayName:         "Kimi K3-256K",
+		Description:         "Kimi K3-256K - Moonshot AI's 256K-context K3 variant with half the K3 usage rate",
 		ContextLength:       262144,
-		MaxCompletionTokens: 65536,
+		MaxCompletionTokens: 131072,
 		Thinking:            &ThinkingSupport{ZeroAllowed: false, Levels: []string{"low", "high", "max"}},
 	}
 }

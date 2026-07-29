@@ -884,11 +884,6 @@ func normalizeKimiUpstreamModel(model string) string {
 		base = base[:len(base)-len("[1m]")]
 	}
 	normalized := strings.ToLower(stripKimiPrefix(strings.TrimSpace(base)))
-	// K3.2 is the current K3 subscription variant, but Kimi OAuth accepts it
-	// under the canonical upstream model ID `k3`, not `k3.2`.
-	if normalized == "k3.2" {
-		normalized = "k3"
-	}
 	if parsed.HasSuffix {
 		return normalized + "(" + parsed.RawSuffix + ")"
 	}

@@ -2422,15 +2422,15 @@
       }
     },
     {
-      "id": "kimi-k3.2",
+      "id": "kimi-k3-256k",
       "object": "model",
       "created": 1785288992,
       "owned_by": "moonshot",
       "type": "kimi",
-      "display_name": "Kimi K3.2",
-      "description": "Kimi K3.2 - Moonshot AI's 256K-context K3.2 model with half the K3 usage rate",
+      "display_name": "Kimi K3-256K",
+      "description": "Kimi K3-256K - Moonshot AI's 256K-context K3 variant with half the K3 usage rate",
       "context_length": 262144,
-      "max_completion_tokens": 65536,
+      "max_completion_tokens": 131072,
       "thinking": {
         "zero_allowed": false,
         "levels": [
