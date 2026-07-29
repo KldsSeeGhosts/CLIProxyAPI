@@ -18,9 +18,11 @@ func TestUsageQueuePluginPayloadIncludesStableFieldsAndSuccess(t *testing.T) {
 		ctx := internallogging.WithRequestID(context.Background(), "ctx-request-id")
 		ctx = internallogging.WithEndpoint(ctx, "POST /v1/chat/completions")
 		ctx = internallogging.WithClientRequestMetadata(ctx, internallogging.ClientRequestMetadata{
-			ClientIP:      "192.0.2.10",
-			XForwardedFor: "203.0.113.5, 198.51.100.8",
-			UserAgent:     "test-client/1.0",
+			ClientIP:         "192.0.2.10",
+			XForwardedFor:    "203.0.113.5, 198.51.100.8",
+			UserAgent:        "test-client/1.0",
+			ClientOriginator: "Codex Desktop",
+			ClientUserAgent:  "codex-desktop/0.144.3",
 		})
 		ctx = internallogging.WithResponseStatusHolder(ctx)
 		internallogging.SetResponseStatus(ctx, http.StatusOK)
@@ -65,6 +67,8 @@ func TestUsageQueuePluginPayloadIncludesStableFieldsAndSuccess(t *testing.T) {
 		requireStringField(t, payload, "client_ip", "192.0.2.10")
 		requireStringField(t, payload, "x_forwarded_for", "203.0.113.5, 198.51.100.8")
 		requireStringField(t, payload, "user_agent", "test-client/1.0")
+		requireStringField(t, payload, "client_originator", "Codex Desktop")
+		requireStringField(t, payload, "client_user_agent", "codex-desktop/0.144.3")
 		requireStringField(t, payload, "reasoning_effort", "medium")
 		requireStringField(t, payload, "service_tier", "auto")
 		requireMissingField(t, payload, "request_service_tier")
