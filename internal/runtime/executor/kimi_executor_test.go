@@ -132,7 +132,7 @@ func TestKimiExecutorClaudeRequestPreservesInternalModelSemantics(t *testing.T) 
 	}
 }
 
-func TestKimiExecutorCountTokensUsesCanonicalUpstreamModel(t *testing.T) {
+func TestKimiExecutorCountTokensUsesK32CodingEndpoint(t *testing.T) {
 	var upstreamRequest *http.Request
 	var upstreamBody []byte
 	ctx := context.WithValue(context.Background(), "cliproxy.roundtripper", kimiRoundTripperFunc(func(req *http.Request) (*http.Response, error) {
@@ -154,9 +154,9 @@ func TestKimiExecutorCountTokensUsesCanonicalUpstreamModel(t *testing.T) {
 		Attributes: map[string]string{},
 		Metadata:   map[string]any{"access_token": "test-token"},
 	}
-	payload := []byte(`{"model":"kimi-k3[1m](high)","messages":[{"role":"user","content":"hello"}]}`)
+	payload := []byte(`{"model":"kimi-k3.2[1m](high)","messages":[{"role":"user","content":"hello"}]}`)
 	_, err := executor.CountTokens(ctx, auth, cliproxyexecutor.Request{
-		Model:   "kimi-k3[1m](high)",
+		Model:   "kimi-k3.2[1m](high)",
 		Payload: payload,
 	}, cliproxyexecutor.Options{SourceFormat: sdktranslator.FormatClaude})
 	if err != nil {
@@ -168,8 +168,8 @@ func TestKimiExecutorCountTokensUsesCanonicalUpstreamModel(t *testing.T) {
 	if got := upstreamRequest.URL.String(); got != "https://api.kimi.com/coding/v1/messages/count_tokens?beta=true" {
 		t.Fatalf("upstream URL = %q, want Kimi count tokens endpoint", got)
 	}
-	if got := gjson.GetBytes(upstreamBody, "model").String(); got != "k3" {
-		t.Fatalf("upstream model = %q, want k3", got)
+	if got := gjson.GetBytes(upstreamBody, "model").String(); got != "k3.2" {
+		t.Fatalf("upstream model = %q, want k3.2", got)
 	}
 }
 
