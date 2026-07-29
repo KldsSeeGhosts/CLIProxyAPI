@@ -9,6 +9,7 @@ import (
 const (
 	codexBuiltinImage15ModelID      = "gpt-image-1.5"
 	codexBuiltinImageModelID        = "gpt-image-2"
+	kimiBuiltinK32ModelID           = "kimi-k3.2"
 	xaiBuiltinImageModelID          = "grok-imagine-image"
 	xaiBuiltinImageQualityModelID   = "grok-imagine-image-quality"
 	xaiBuiltinVideoModelID          = "grok-imagine-video"
@@ -72,7 +73,7 @@ func GetCodexProModels() []*ModelInfo {
 
 // GetKimiModels returns the standard Kimi (Moonshot AI) model definitions.
 func GetKimiModels() []*ModelInfo {
-	return cloneModelInfos(getModels().Kimi)
+	return WithKimiBuiltins(cloneModelInfos(getModels().Kimi))
 }
 
 // GetAntigravityModels returns the standard Antigravity model definitions.
@@ -117,6 +118,12 @@ func WithCodexBuiltins(models []*ModelInfo) []*ModelInfo {
 	return upsertModelInfos(models, codexBuiltinImage15ModelInfo(), codexBuiltinImageModelInfo())
 }
 
+// WithKimiBuiltins injects Kimi models that must remain available when the
+// remotely refreshed catalog has not caught up with the provider release.
+func WithKimiBuiltins(models []*ModelInfo) []*ModelInfo {
+	return upsertModelInfos(models, kimiBuiltinK32ModelInfo())
+}
+
 // WithXAIBuiltins injects hard-coded xAI image/video model definitions that should
 // not depend on remote models.json updates.
 func WithXAIBuiltins(models []*ModelInfo) []*ModelInfo {
@@ -152,6 +159,21 @@ func codexBuiltinImageModelInfo() *ModelInfo {
 		Type:        "openai",
 		DisplayName: "GPT Image 2",
 		Version:     codexBuiltinImageModelID,
+	}
+}
+
+func kimiBuiltinK32ModelInfo() *ModelInfo {
+	return &ModelInfo{
+		ID:                  kimiBuiltinK32ModelID,
+		Object:              "model",
+		Created:             1785288992,
+		OwnedBy:             "moonshot",
+		Type:                "kimi",
+		DisplayName:         "Kimi K3.2",
+		Description:         "Kimi K3.2 - Moonshot AI's 256K-context K3.2 model with half the K3 usage rate",
+		ContextLength:       262144,
+		MaxCompletionTokens: 65536,
+		Thinking:            &ThinkingSupport{ZeroAllowed: false, Levels: []string{"low", "high", "max"}},
 	}
 }
 
