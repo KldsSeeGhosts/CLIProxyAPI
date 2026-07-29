@@ -1,7 +1,9 @@
 package proto
 
 import (
+	"context"
 	"crypto/tls"
+	"errors"
 	"fmt"
 	"io"
 	"net"
@@ -37,6 +39,30 @@ type H2Stream struct {
 	connWindow int32      // available bytes on the connection level
 	windowCond *sync.Cond // signaled when window is updated
 	windowMu   sync.Mutex // protects sendWindow, connWindow
+	closed     bool
+}
+
+// BootstrapError records whether a Cursor Run stream might have reached the
+// service. Callers must only retry failures before the request is committed.
+type BootstrapError struct {
+	cause     error
+	committed bool
+}
+
+func (e *BootstrapError) Error() string {
+	if e == nil || e.cause == nil {
+		return "cursor h2 bootstrap failed"
+	}
+	return e.cause.Error()
+}
+
+func (e *BootstrapError) Unwrap() error { return e.cause }
+
+// IsPreCommitBootstrapError reports whether err occurred before HTTP/2 request
+// headers were written. Retrying any later failure could replay a Cursor turn.
+func IsPreCommitBootstrapError(err error) bool {
+	var bootstrap *BootstrapError
+	return errors.As(err, &bootstrap) && !bootstrap.committed
 }
 
 // ID returns the unique identifier for this stream (for logging).
@@ -51,15 +77,47 @@ func (s *H2Stream) FrameNum() int64 {
 
 // DialH2Stream establishes a TLS+HTTP/2 connection and opens a new stream.
 func DialH2Stream(host string, headers map[string]string) (*H2Stream, error) {
-	tlsConn, err := tls.Dial("tcp", host+":443", &tls.Config{
-		NextProtos: []string{"h2"},
-	})
+	return DialH2StreamContext(context.Background(), host, headers)
+}
+
+// DialH2StreamContext establishes the H2 connection while respecting ctx. The
+// caller owns the deadline; all bootstrap phases are bounded until the stream
+// is ready for normal long-running operation.
+func DialH2StreamContext(ctx context.Context, host string, headers map[string]string) (*H2Stream, error) {
+	if ctx == nil {
+		ctx = context.Background()
+	}
+
+	dialer := &net.Dialer{}
+	conn, err := dialer.DialContext(ctx, "tcp", net.JoinHostPort(host, "443"))
 	if err != nil {
-		return nil, fmt.Errorf("h2: TLS dial failed: %w", err)
+		return nil, &BootstrapError{cause: fmt.Errorf("h2: TCP dial failed: %w", err)}
+	}
+	tlsConn := tls.Client(conn, &tls.Config{NextProtos: []string{"h2"}, ServerName: host})
+	bootstrapDone := make(chan struct{})
+	defer close(bootstrapDone)
+	go func() {
+		select {
+		case <-ctx.Done():
+			// A context cancellation must interrupt the manual framer's blocking
+			// reads as well as the initial TCP dial/TLS handshake.
+			_ = tlsConn.Close()
+		case <-bootstrapDone:
+		}
+	}()
+	if deadline, ok := ctx.Deadline(); ok {
+		if err := tlsConn.SetDeadline(deadline); err != nil {
+			tlsConn.Close()
+			return nil, &BootstrapError{cause: fmt.Errorf("h2: set bootstrap deadline failed: %w", err)}
+		}
+	}
+	if err := tlsConn.HandshakeContext(ctx); err != nil {
+		tlsConn.Close()
+		return nil, &BootstrapError{cause: fmt.Errorf("h2: TLS handshake failed: %w", err)}
 	}
 	if tlsConn.ConnectionState().NegotiatedProtocol != "h2" {
 		tlsConn.Close()
-		return nil, fmt.Errorf("h2: server did not negotiate h2")
+		return nil, &BootstrapError{cause: fmt.Errorf("h2: server did not negotiate h2")}
 	}
 
 	framer := http2.NewFramer(tlsConn, tlsConn)
@@ -67,7 +125,7 @@ func DialH2Stream(host string, headers map[string]string) (*H2Stream, error) {
 	// Client connection preface
 	if _, err := tlsConn.Write([]byte(http2.ClientPreface)); err != nil {
 		tlsConn.Close()
-		return nil, fmt.Errorf("h2: preface write failed: %w", err)
+		return nil, &BootstrapError{cause: fmt.Errorf("h2: preface write failed: %w", err)}
 	}
 
 	// Send initial SETTINGS (tell server how much WE can receive)
@@ -76,13 +134,13 @@ func DialH2Stream(host string, headers map[string]string) (*H2Stream, error) {
 		http2.Setting{ID: http2.SettingMaxConcurrentStreams, Val: 100},
 	); err != nil {
 		tlsConn.Close()
-		return nil, fmt.Errorf("h2: settings write failed: %w", err)
+		return nil, &BootstrapError{cause: fmt.Errorf("h2: settings write failed: %w", err)}
 	}
 
 	// Connection-level window update (for receiving)
 	if err := framer.WriteWindowUpdate(0, 3*1024*1024); err != nil {
 		tlsConn.Close()
-		return nil, fmt.Errorf("h2: window update failed: %w", err)
+		return nil, &BootstrapError{cause: fmt.Errorf("h2: window update failed: %w", err)}
 	}
 
 	// Read and handle initial server frames (SETTINGS, WINDOW_UPDATE)
@@ -93,7 +151,7 @@ func DialH2Stream(host string, headers map[string]string) (*H2Stream, error) {
 		f, err := framer.ReadFrame()
 		if err != nil {
 			tlsConn.Close()
-			return nil, fmt.Errorf("h2: initial frame read failed: %w", err)
+			return nil, &BootstrapError{cause: fmt.Errorf("h2: initial frame read failed: %w", err)}
 		}
 		switch sf := f.(type) {
 		case *http2.SettingsFrame:
@@ -137,6 +195,8 @@ handshakeDone:
 		enc.WriteField(hpack.HeaderField{Name: k, Value: v})
 	}
 
+	// Headers start a server-side request. From this point onward, a retry may
+	// duplicate a turn, so even a local write failure is treated as committed.
 	if err := framer.WriteHeaders(http2.HeadersFrameParam{
 		StreamID:      streamID,
 		BlockFragment: hdrBuf,
@@ -144,7 +204,11 @@ handshakeDone:
 		EndHeaders:    true,
 	}); err != nil {
 		tlsConn.Close()
-		return nil, fmt.Errorf("h2: headers write failed: %w", err)
+		return nil, &BootstrapError{cause: fmt.Errorf("h2: headers write failed: %w", err), committed: true}
+	}
+	if err := tlsConn.SetDeadline(time.Time{}); err != nil {
+		tlsConn.Close()
+		return nil, &BootstrapError{cause: fmt.Errorf("h2: clear bootstrap deadline failed: %w", err), committed: true}
 	}
 
 	s := &H2Stream{
@@ -173,8 +237,12 @@ func (s *H2Stream) Write(data []byte) error {
 
 		// Wait for flow control window
 		s.windowMu.Lock()
-		for s.sendWindow <= 0 || s.connWindow <= 0 {
+		for !s.closed && (s.sendWindow <= 0 || s.connWindow <= 0) {
 			s.windowCond.Wait()
+		}
+		if s.closed {
+			s.windowMu.Unlock()
+			return net.ErrClosed
 		}
 		// Limit chunk to available window
 		allowed := int(s.sendWindow)
@@ -211,13 +279,21 @@ func (s *H2Stream) Err() error { return s.err }
 
 // Close tears down the connection.
 func (s *H2Stream) Close() {
-	s.conn.Close()
-	// Unblock any writers waiting on flow control
+	s.windowMu.Lock()
+	s.closed = true
 	s.windowCond.Broadcast()
+	s.windowMu.Unlock()
+	s.conn.Close()
 }
 
 func (s *H2Stream) readLoop() {
-	defer close(s.doneCh)
+	defer func() {
+		s.windowMu.Lock()
+		s.closed = true
+		s.windowCond.Broadcast()
+		s.windowMu.Unlock()
+		close(s.doneCh)
+	}()
 	defer close(s.dataCh)
 
 	for {
