@@ -168,8 +168,8 @@ func TestKimiExecutorCountTokensUsesK32CodingEndpoint(t *testing.T) {
 	if got := upstreamRequest.URL.String(); got != "https://api.kimi.com/coding/v1/messages/count_tokens?beta=true" {
 		t.Fatalf("upstream URL = %q, want Kimi count tokens endpoint", got)
 	}
-	if got := gjson.GetBytes(upstreamBody, "model").String(); got != "k3.2" {
-		t.Fatalf("upstream model = %q, want k3.2", got)
+	if got := gjson.GetBytes(upstreamBody, "model").String(); got != "k3" {
+		t.Fatalf("upstream model = %q, want k3", got)
 	}
 }
 
@@ -578,7 +578,7 @@ func TestNormalizeKimiUpstreamModel(t *testing.T) {
 	}{
 		{"kimi-k3[1m]", "k3"},
 		{"kimi-k3", "k3"},
-		{"kimi-k3.2", "k3.2"},
+		{"kimi-k3.2", "k3"},
 		{"Kimi-K3[1M]", "k3"},
 		{"k3[1m]", "k3"},
 		{"k3", "k3"},
