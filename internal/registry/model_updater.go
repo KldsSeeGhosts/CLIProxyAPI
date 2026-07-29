@@ -121,6 +121,10 @@ func tryRefreshModels(ctx context.Context, label string) {
 		return
 	}
 
+	if n := enforceOfficialGpt56ContextWindows(parsed); n > 0 {
+		log.Infof("%s: clamped %d GPT-5.6 context_length field(s) to %d from %s", label, n, officialGpt56ContextWindow, url)
+	}
+
 	// Detect changes before updating store.
 	changed := detectChangedProviders(oldData, parsed)
 
@@ -298,6 +302,9 @@ func loadModelsFromBytes(data []byte, source string) error {
 	var parsed staticModelsJSON
 	if err := json.Unmarshal(data, &parsed); err != nil {
 		return fmt.Errorf("%s: decode models catalog: %w", source, err)
+	}
+	if n := enforceOfficialGpt56ContextWindows(&parsed); n > 0 {
+		log.Infof("registry: clamped %d GPT-5.6 context_length field(s) to %d from %s", n, officialGpt56ContextWindow, source)
 	}
 	if err := validateModelsCatalog(&parsed); err != nil {
 		return fmt.Errorf("%s: validate models catalog: %w", source, err)

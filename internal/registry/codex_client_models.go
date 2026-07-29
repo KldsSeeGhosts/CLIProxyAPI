@@ -48,11 +48,18 @@ func GetCodexClientModelsSnapshot() ([]byte, uint64) {
 }
 
 func loadCodexClientModelsFromBytes(data []byte, source string) (bool, error) {
-	if err := ValidateCodexClientModelsJSON(data); err != nil {
+	clamped, changedFields, err := enforceOfficialGpt56CodexClientContextWindows(data)
+	if err != nil {
+		return false, fmt.Errorf("%s: %w", source, err)
+	}
+	if changedFields > 0 {
+		log.Infof("registry: clamped %d GPT-5.6 Codex client context field(s) to %d from %s", changedFields, officialGpt56ContextWindow, source)
+	}
+	if err := ValidateCodexClientModelsJSON(clamped); err != nil {
 		return false, fmt.Errorf("%s: %w", source, err)
 	}
 
-	cloned := append([]byte(nil), data...)
+	cloned := append([]byte(nil), clamped...)
 	codexClientCatalogStore.mu.Lock()
 	defer codexClientCatalogStore.mu.Unlock()
 	if bytes.Equal(codexClientCatalogStore.data, cloned) {

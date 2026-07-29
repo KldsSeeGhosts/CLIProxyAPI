@@ -221,16 +221,22 @@ func responsesSingleCustomToolName(requestRawJSON []byte) (string, bool) {
 }
 
 // unwrapCustomToolInput extracts the freeform input from the {"input": "..."}
-// function-call arguments produced for a converted custom tool; it falls back
-// to the raw arguments when the wrapper is absent.
+// function-call arguments produced for a converted custom tool. Some backends
+// can repeat that compatibility envelope, so unwrap every nested input layer;
+// fall back to the raw arguments when the wrapper is absent.
 func unwrapCustomToolInput(arguments string) string {
-	if v := gjson.Get(arguments, "input"); v.Exists() {
-		if v.Type == gjson.String {
-			return v.String()
+	input := arguments
+	for {
+		v := gjson.Get(input, "input")
+		if !v.Exists() {
+			return input
 		}
-		return v.Raw
+		if v.Type == gjson.String {
+			input = v.String()
+		} else {
+			input = v.Raw
+		}
 	}
-	return arguments
 }
 
 func qualifyResponsesNamespaceToolName(namespaceName, childName string) string {
