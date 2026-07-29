@@ -2439,25 +2439,6 @@
           "max"
         ]
       }
-    },
-    {
-      "id": "kimi-k3.2",
-      "object": "model",
-      "created": 1785288992,
-      "owned_by": "moonshot",
-      "type": "kimi",
-      "display_name": "Kimi K3.2",
-      "description": "Kimi K3.2 - Moonshot AI's 256K-context K3.2 model with half the K3 usage rate",
-      "context_length": 262144,
-      "max_completion_tokens": 65536,
-      "thinking": {
-        "zero_allowed": false,
-        "levels": [
-          "low",
-          "high",
-          "max"
-        ]
-      }
     }
   ],
   "antigravity": [
