@@ -102,6 +102,71 @@ func EncodeHeartbeat() []byte {
 	return marshal(acm)
 }
 
+const nonInteractiveInteractionReason = "CPA Cursor routing is non-interactive; continue without this action."
+
+// EncodeInteractionResponse unblocks a Cursor interaction gate without giving
+// the gateway authority to perform client-side actions. Search permission
+// gates are rejected so the proxy does not silently spend Cursor search quota.
+func EncodeInteractionResponse(queryID uint32, kind InteractionQueryKind) []byte {
+	response := newMsg("InteractionResponse")
+	setUint32(response, "id", queryID)
+
+	switch kind {
+	case InteractionQueryCreatePlan:
+		planResult := newMsg("CreatePlanResult")
+		setMsg(planResult, "success", newMsg("CreatePlanSuccess"))
+		planResponse := newMsg("CreatePlanRequestResponse")
+		setMsg(planResponse, "result", planResult)
+		setMsg(response, "create_plan_request_response", planResponse)
+	case InteractionQueryAskQuestion:
+		result := newMsg("AskQuestionResult")
+		rejected := newMsg("AskQuestionRejected")
+		setStr(rejected, "reason", nonInteractiveInteractionReason)
+		setMsg(result, "rejected", rejected)
+		askResponse := newMsg("AskQuestionInteractionResponse")
+		setMsg(askResponse, "result", result)
+		setMsg(response, "ask_question_interaction_response", askResponse)
+	case InteractionQuerySwitchMode:
+		setInteractionRejection(response, "switch_mode_request_response", "SwitchModeRequestResponse_Rejected")
+	case InteractionQueryWebSearch:
+		setInteractionRejection(response, "web_search_request_response", "WebSearchRequestResponse_Rejected")
+	case InteractionQueryExaSearch:
+		setInteractionRejection(response, "exa_search_request_response", "ExaSearchRequestResponse_Rejected")
+	case InteractionQueryExaFetch:
+		setInteractionRejection(response, "exa_fetch_request_response", "ExaFetchRequestResponse_Rejected")
+	case InteractionQuerySetupVM, InteractionQueryUnknown:
+		// These variants have no safe gateway-side action. Echoing the ID with
+		// an empty oneof tells Cursor this unattended harness cannot service it.
+	}
+
+	acm := newMsg("AgentClientMessage")
+	setMsg(acm, "interaction_response", response)
+	return marshal(acm)
+}
+
+func setInteractionRejection(response *dynamicpb.Message, responseField, rejectedMessage string) {
+	rejected := newMsg(rejectedMessage)
+	setStr(rejected, "reason", nonInteractiveInteractionReason)
+	result := newMsg(responseFieldToMessageName(responseField))
+	setMsg(result, "rejected", rejected)
+	setMsg(response, responseField, result)
+}
+
+func responseFieldToMessageName(fieldName string) string {
+	switch fieldName {
+	case "switch_mode_request_response":
+		return "SwitchModeRequestResponse"
+	case "web_search_request_response":
+		return "WebSearchRequestResponse"
+	case "exa_search_request_response":
+		return "ExaSearchRequestResponse"
+	case "exa_fetch_request_response":
+		return "ExaFetchRequestResponse"
+	default:
+		panic("unknown Cursor interaction response field: " + fieldName)
+	}
+}
+
 // EncodeRunRequest builds a full AgentClientMessage wrapping an AgentRunRequest.
 // Mirrors buildCursorRequest() in cursor-fetch.ts.
 // If p.RawCheckpoint is set, it is used directly as the conversation_state bytes
