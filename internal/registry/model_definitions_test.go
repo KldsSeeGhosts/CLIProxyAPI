@@ -50,6 +50,22 @@ func TestWithXAIBuiltinsIncludesVideoPreviewModel(t *testing.T) {
 	t.Fatalf("expected xAI builtin model %s", xaiBuiltinVideo15PreviewModelID)
 }
 
+func TestWithKimiBuiltinsIncludesK32(t *testing.T) {
+	models := WithKimiBuiltins(nil)
+
+	for _, model := range models {
+		if model == nil || model.ID != kimiBuiltinK32ModelID {
+			continue
+		}
+		if model.ContextLength != 262144 {
+			t.Fatalf("K3.2 context length = %d, want 262144", model.ContextLength)
+		}
+		return
+	}
+
+	t.Fatalf("expected Kimi builtin model %s", kimiBuiltinK32ModelID)
+}
+
 func TestAntigravityWebSearchModelForRequiresRequestedModelCapability(t *testing.T) {
 	registryRef := GetGlobalRegistry()
 	registryRef.RegisterClient("test-antigravity-websearch-route", "antigravity", []*ModelInfo{

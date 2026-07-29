@@ -578,6 +578,7 @@ func TestNormalizeKimiUpstreamModel(t *testing.T) {
 	}{
 		{"kimi-k3[1m]", "k3"},
 		{"kimi-k3", "k3"},
+		{"kimi-k3.2", "k3.2"},
 		{"Kimi-K3[1M]", "k3"},
 		{"k3[1m]", "k3"},
 		{"k3", "k3"},
