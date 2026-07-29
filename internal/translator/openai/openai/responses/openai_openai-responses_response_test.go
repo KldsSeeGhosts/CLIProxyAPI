@@ -594,6 +594,38 @@ func TestConvertOpenAIChatCompletionsResponseToOpenAIResponsesNonStream_Restores
 	}
 }
 
+func TestUnwrapCustomToolInput(t *testing.T) {
+	tests := []struct {
+		name      string
+		arguments string
+		want      string
+	}{
+		{
+			name:      "raw freeform input",
+			arguments: `const result = await tools.exec_command({cmd: "pwd"}); text(result);`,
+			want:      `const result = await tools.exec_command({cmd: "pwd"}); text(result);`,
+		},
+		{
+			name:      "single compatibility envelope",
+			arguments: `{"input":"const result = await tools.exec_command({cmd: \"pwd\"}); text(result);"}`,
+			want:      `const result = await tools.exec_command({cmd: "pwd"}); text(result);`,
+		},
+		{
+			name:      "repeated compatibility envelope",
+			arguments: `{"input":"{\"input\":\"const result = await tools.exec_command({cmd: \\\"pwd\\\"}); text(result);\"}"}`,
+			want:      `const result = await tools.exec_command({cmd: "pwd"}); text(result);`,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := unwrapCustomToolInput(tt.arguments); got != tt.want {
+				t.Fatalf("unwrapCustomToolInput() = %q, want %q", got, tt.want)
+			}
+		})
+	}
+}
+
 func TestConvertOpenAIChatCompletionsResponseToOpenAIResponses_CustomToolNameArrivesLate(t *testing.T) {
 	originalRequest := []byte(`{
 		"model":"gpt-5.4",
