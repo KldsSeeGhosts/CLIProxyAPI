@@ -2,9 +2,32 @@ package executor
 
 import (
 	"encoding/json"
+	"errors"
+	"net/http"
 	"strings"
 	"testing"
 )
+
+func TestRequestScopedCursorErrorRetainsExplicitAuthAndQuotaFailures(t *testing.T) {
+	tests := []struct {
+		name          string
+		input         error
+		requestScoped bool
+	}{
+		{name: "transport timeout", input: cursorStatusErr{code: http.StatusGatewayTimeout, msg: "timed out"}, requestScoped: true},
+		{name: "quota", input: cursorStatusErr{code: http.StatusTooManyRequests, msg: "quota exceeded"}, requestScoped: false},
+		{name: "unauthorized", input: cursorStatusErr{code: http.StatusUnauthorized, msg: "expired"}, requestScoped: false},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := requestScopedCursorError(tt.input)
+			var scoped interface{ IsRequestScoped() bool }
+			if errors.As(got, &scoped) != tt.requestScoped {
+				t.Fatalf("request scoped = %t, want %t", errors.As(got, &scoped), tt.requestScoped)
+			}
+		})
+	}
+}
 
 func TestCursorTextDeltaJSONSeparatesThinkingFromVisibleContent(t *testing.T) {
 	thinking := cursorTextDeltaJSON("private reasoning", true)

@@ -11,6 +11,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"net"
 	"net/http"
 	"os"
 	"regexp"
@@ -42,6 +43,9 @@ const (
 	cursorClientVersion        = cursorClientVersionDefault
 	cursorAuthType             = "cursor"
 	cursorHeartbeatInterval    = 5 * time.Second
+	cursorFirstFrameTimeout    = 30 * time.Second
+	cursorBootstrapRetryLimit  = 2
+	cursorBootstrapRetryDelay  = 250 * time.Millisecond
 	cursorSessionTTL           = 5 * time.Minute
 	cursorCheckpointTTL        = 30 * time.Minute
 )
@@ -168,6 +172,29 @@ func (e cursorStatusErr) Error() string              { return e.msg }
 func (e cursorStatusErr) StatusCode() int            { return e.code }
 func (e cursorStatusErr) RetryAfter() *time.Duration { return nil } // no retry-after info from Cursor; conductor uses exponential backoff
 
+// cursorRequestScopedError prevents a transient transport failure from being
+// misattributed to a Cursor account. It also prevents replay after the request
+// may have reached Cursor.
+type cursorRequestScopedError struct{ cause error }
+
+func (e cursorRequestScopedError) Error() string         { return e.cause.Error() }
+func (e cursorRequestScopedError) Unwrap() error         { return e.cause }
+func (e cursorRequestScopedError) IsRequestScoped() bool { return true }
+
+func requestScopedCursorError(err error) error {
+	classified := classifyCursorError(err)
+	var statusErr interface{ StatusCode() int }
+	if errors.As(classified, &statusErr) {
+		switch statusErr.StatusCode() {
+		case http.StatusUnauthorized, http.StatusForbidden, http.StatusTooManyRequests:
+			// Explicit upstream auth and quota states retain the existing auth
+			// refresh/cooldown/failover policy.
+			return classified
+		}
+	}
+	return cursorRequestScopedError{cause: classified}
+}
+
 // classifyCursorError maps Cursor Connect/H2 errors to HTTP status codes.
 // Layer 1: precise match on ConnectError.Code (gRPC standard codes).
 // Layer 2: fuzzy string match for H2 frame errors and unknown formats.
@@ -206,6 +233,8 @@ func classifyCursorError(err error) error {
 		return cursorStatusErr{code: 429, msg: err.Error()}
 	case strings.Contains(msg, "rst_stream") || strings.Contains(msg, "goaway"):
 		return cursorStatusErr{code: 502, msg: err.Error()}
+	case strings.Contains(msg, "deadline exceeded") || strings.Contains(msg, "timed out") || strings.Contains(msg, "timeout"):
+		return cursorStatusErr{code: http.StatusGatewayTimeout, msg: err.Error()}
 	}
 
 	return err
@@ -317,15 +346,17 @@ func (e *CursorExecutor) Execute(ctx context.Context, auth *cliproxyauth.Auth, r
 	requestBytes := cursorproto.EncodeRunRequest(params)
 	framedRequest := cursorproto.FrameConnectMessage(requestBytes, 0)
 
-	stream, err := openCursorH2Stream(accessToken)
+	bootstrapCtx, bootstrapCancel := context.WithTimeout(ctx, cursorFirstFrameTimeout)
+	defer bootstrapCancel()
+	stream, err := openCursorH2StreamWithRetry(bootstrapCtx, accessToken)
 	if err != nil {
-		return resp, err
+		return resp, requestScopedCursorError(err)
 	}
 	defer stream.Close()
 
 	// Send the request frame
 	if err := stream.Write(framedRequest); err != nil {
-		return resp, fmt.Errorf("cursor: failed to send request: %w", err)
+		return resp, requestScopedCursorError(fmt.Errorf("cursor: failed to send request: %w", err))
 	}
 
 	// Start heartbeat
@@ -344,7 +375,7 @@ func (e *CursorExecutor) Execute(ctx context.Context, auth *cliproxyauth.Auth, r
 		nil, // tokenUsage - non-streaming
 		nil, // onCheckpoint - non-streaming doesn't persist
 	); streamErr != nil && fullText.Len() == 0 {
-		return resp, classifyCursorError(fmt.Errorf("cursor: stream error: %w", streamErr))
+		return resp, requestScopedCursorError(fmt.Errorf("cursor: stream error: %w", streamErr))
 	}
 
 	id := "chatcmpl-" + uuid.New().String()[:28]
@@ -508,14 +539,17 @@ func (e *CursorExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.A
 	requestBytes := cursorproto.EncodeRunRequest(params)
 	framedRequest := cursorproto.FrameConnectMessage(requestBytes, 0)
 
-	stream, err := openCursorH2Stream(accessToken)
+	firstFrameDeadline := time.Now().Add(cursorFirstFrameTimeout)
+	firstFrameCtx, firstFrameCancel := context.WithDeadline(ctx, firstFrameDeadline)
+	defer firstFrameCancel()
+	stream, err := openCursorH2StreamWithRetry(firstFrameCtx, accessToken)
 	if err != nil {
-		return nil, err
+		return nil, requestScopedCursorError(err)
 	}
 
 	if err := stream.Write(framedRequest); err != nil {
 		stream.Close()
-		return nil, fmt.Errorf("cursor: failed to send request: %w", err)
+		return nil, requestScopedCursorError(fmt.Errorf("cursor: failed to send request: %w", err))
 	}
 
 	// Use a session-scoped context for the heartbeat that is NOT tied to the HTTP request.
@@ -675,9 +709,19 @@ func (e *CursorExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.A
 		if streamErr != nil {
 			select {
 			case <-firstChunkSent:
-				// Chunks were already sent to client — can't transparently retry.
-				// Next request will failover via conductor's cooldown mechanism.
+				// Chunks were already sent to the client, so replay is unsafe. Surface
+				// the terminal error rather than fabricating a successful stop chunk.
 				log.Warnf("cursor: stream error after data sent (auth=%s conv=%s): %v", authID, conversationId, streamErr)
+				emitToOut(cliproxyexecutor.StreamChunk{Err: requestScopedCursorError(fmt.Errorf("cursor: stream failed after response: %w", streamErr))})
+				outMu.Lock()
+				if currentOut != nil {
+					close(currentOut)
+					currentOut = nil
+				}
+				outMu.Unlock()
+				sessionCancel()
+				stream.Close()
+				return
 			default:
 				// No data sent yet — propagate error for transparent conductor retry.
 				log.Warnf("cursor: stream error before data sent (auth=%s conv=%s): %v — signaling retry", authID, conversationId, streamErr)
@@ -728,12 +772,21 @@ func (e *CursorExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.A
 	// Wait for either the first chunk or a pre-response error.
 	// If the stream fails before emitting any data (e.g. quota exceeded),
 	// return an error so the conductor retries with a different auth.
+	firstFrameTimer := time.NewTimer(max(time.Until(firstFrameDeadline), 0))
+	defer firstFrameTimer.Stop()
 	select {
 	case streamErr := <-streamErrCh:
-		return nil, classifyCursorError(fmt.Errorf("cursor: stream failed before response: %w", streamErr))
+		return nil, requestScopedCursorError(fmt.Errorf("cursor: stream failed before response: %w", streamErr))
 	case <-firstChunkSent:
 		// Data started flowing — return stream to client
 		return &cliproxyexecutor.StreamResult{Chunks: chunks}, nil
+	case <-firstFrameTimer.C:
+		sessionCancel()
+		stream.Close()
+		return nil, requestScopedCursorError(cursorStatusErr{
+			code: http.StatusGatewayTimeout,
+			msg:  fmt.Sprintf("cursor: no response frame within %s", cursorFirstFrameTimeout),
+		})
 	}
 }
 
@@ -778,7 +831,43 @@ func (e *CursorExecutor) resumeWithToolResults(
 
 // --- H2Stream helpers ---
 
-func openCursorH2Stream(accessToken string) (*cursorproto.H2Stream, error) {
+func openCursorH2StreamWithRetry(ctx context.Context, accessToken string) (*cursorproto.H2Stream, error) {
+	var lastErr error
+	for attempt := 0; attempt < cursorBootstrapRetryLimit; attempt++ {
+		stream, err := openCursorH2Stream(ctx, accessToken)
+		if err == nil {
+			return stream, nil
+		}
+		lastErr = err
+		if !cursorproto.IsPreCommitBootstrapError(err) || !isRetryableCursorBootstrapError(err) || attempt == cursorBootstrapRetryLimit-1 {
+			break
+		}
+		timer := time.NewTimer(cursorBootstrapRetryDelay)
+		select {
+		case <-ctx.Done():
+			timer.Stop()
+			return nil, ctx.Err()
+		case <-timer.C:
+		}
+	}
+	return nil, lastErr
+}
+
+func isRetryableCursorBootstrapError(err error) bool {
+	var netErr net.Error
+	if errors.As(err, &netErr) && (netErr.Timeout() || netErr.Temporary()) {
+		return true
+	}
+	msg := strings.ToLower(err.Error())
+	return strings.Contains(msg, "connection reset") ||
+		strings.Contains(msg, "connection refused") ||
+		strings.Contains(msg, "network is unreachable") ||
+		strings.Contains(msg, "no such host") ||
+		strings.Contains(msg, "deadline exceeded") ||
+		strings.Contains(msg, "timed out")
+}
+
+func openCursorH2Stream(ctx context.Context, accessToken string) (*cursorproto.H2Stream, error) {
 	headers := map[string]string{
 		":path":                    cursorRunPath,
 		"content-type":             "application/connect+proto",
@@ -790,7 +879,7 @@ func openCursorH2Stream(accessToken string) (*cursorproto.H2Stream, error) {
 		"x-cursor-client-type":     "cli",
 		"x-request-id":             uuid.New().String(),
 	}
-	return cursorproto.DialH2Stream("api2.cursor.sh", headers)
+	return cursorproto.DialH2StreamContext(ctx, "api2.cursor.sh", headers)
 }
 
 func cursorH2Heartbeat(ctx context.Context, stream *cursorproto.H2Stream) {
@@ -922,6 +1011,14 @@ func processH2SessionFrames(
 					// Server heartbeat, ignore silently
 					continue
 
+				case cursorproto.ServerMsgInteractionQuery:
+					if err := stream.Write(cursorproto.FrameConnectMessage(
+						cursorproto.EncodeInteractionResponse(msg.InteractionQueryID, msg.InteractionQueryKind), 0,
+					)); err != nil {
+						return fmt.Errorf("cursor: reply to interaction query: %w", err)
+					}
+					continue
+
 				case cursorproto.ServerMsgCheckpoint:
 					if onCheckpoint != nil && len(msg.CheckpointData) > 0 {
 						onCheckpoint(msg.CheckpointData)
@@ -1022,6 +1119,12 @@ func processH2SessionFrames(
 									case cursorproto.ServerMsgCheckpoint:
 										if onCheckpoint != nil && len(wmsg.CheckpointData) > 0 {
 											onCheckpoint(wmsg.CheckpointData)
+										}
+									case cursorproto.ServerMsgInteractionQuery:
+										if err := stream.Write(cursorproto.FrameConnectMessage(
+											cursorproto.EncodeInteractionResponse(wmsg.InteractionQueryID, wmsg.InteractionQueryKind), 0,
+										)); err != nil {
+											return fmt.Errorf("cursor: reply to interaction query: %w", err)
 										}
 									}
 								}

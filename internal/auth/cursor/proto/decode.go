@@ -36,6 +36,22 @@ const (
 	ServerMsgHeartbeat                             // Server heartbeat
 	ServerMsgTokenDelta                            // Token usage delta
 	ServerMsgCheckpoint                            // Conversation checkpoint update
+	ServerMsgInteractionQuery                      // Server needs a non-interactive decision
+)
+
+// InteractionQueryKind identifies the server-side interaction gate that must
+// be answered before Cursor can continue the turn.
+type InteractionQueryKind uint8
+
+const (
+	InteractionQueryUnknown InteractionQueryKind = iota
+	InteractionQueryWebSearch
+	InteractionQueryAskQuestion
+	InteractionQuerySwitchMode
+	InteractionQueryExaSearch
+	InteractionQueryExaFetch
+	InteractionQueryCreatePlan
+	InteractionQuerySetupVM
 )
 
 // DecodedServerMessage holds parsed data from an AgentServerMessage.
@@ -73,6 +89,10 @@ type DecodedServerMessage struct {
 
 	// For conversation checkpoint update (raw bytes, not decoded)
 	CheckpointData []byte
+
+	// For InteractionQuery
+	InteractionQueryID   uint32
+	InteractionQueryKind InteractionQueryKind
 }
 
 // DecodeAgentServerMessage parses an AgentServerMessage and returns
@@ -111,6 +131,8 @@ func DecodeAgentServerMessage(data []byte) (*DecodedServerMessage, error) {
 				msg.Type = ServerMsgCheckpoint
 				msg.CheckpointData = append([]byte(nil), val...) // copy raw bytes
 				log.Debugf("DecodeAgentServerMessage: captured checkpoint %d bytes", len(val))
+			case ASM_InteractionQuery:
+				decodeInteractionQuery(val, msg)
 			}
 
 		case protowire.VarintType:
@@ -131,6 +153,55 @@ func DecodeAgentServerMessage(data []byte) (*DecodedServerMessage, error) {
 	}
 
 	return msg, nil
+}
+
+func decodeInteractionQuery(data []byte, msg *DecodedServerMessage) {
+	msg.Type = ServerMsgInteractionQuery
+	for len(data) > 0 {
+		num, typ, n := protowire.ConsumeTag(data)
+		if n < 0 {
+			return
+		}
+		data = data[n:]
+		if num == 1 && typ == protowire.VarintType {
+			id, consumed := protowire.ConsumeVarint(data)
+			if consumed < 0 {
+				return
+			}
+			msg.InteractionQueryID = uint32(id)
+			data = data[consumed:]
+			continue
+		}
+		if typ == protowire.BytesType {
+			_, consumed := protowire.ConsumeBytes(data)
+			if consumed < 0 {
+				return
+			}
+			switch num {
+			case 2:
+				msg.InteractionQueryKind = InteractionQueryWebSearch
+			case 3:
+				msg.InteractionQueryKind = InteractionQueryAskQuestion
+			case 4:
+				msg.InteractionQueryKind = InteractionQuerySwitchMode
+			case 5:
+				msg.InteractionQueryKind = InteractionQueryExaSearch
+			case 6:
+				msg.InteractionQueryKind = InteractionQueryExaFetch
+			case 7:
+				msg.InteractionQueryKind = InteractionQueryCreatePlan
+			case 8:
+				msg.InteractionQueryKind = InteractionQuerySetupVM
+			}
+			data = data[consumed:]
+			continue
+		}
+		consumed := protowire.ConsumeFieldValue(num, typ, data)
+		if consumed < 0 {
+			return
+		}
+		data = data[consumed:]
+	}
 }
 
 func decodeInteractionUpdate(data []byte, msg *DecodedServerMessage) {
