@@ -116,6 +116,8 @@ func (p *usageQueuePlugin) HandleUsage(ctx context.Context, record coreusage.Rec
 		ReasoningEffort:     reasoningEffort,
 		ServiceTier:         serviceTier,
 		ResponseServiceTier: responseServiceTier,
+		ClientOriginator:    clientRequestMetadata.ClientOriginator,
+		ClientUserAgent:     clientRequestMetadata.ClientUserAgent,
 	})
 	if err != nil {
 		return
@@ -138,6 +140,8 @@ type queuedUsageDetail struct {
 	ReasoningEffort     string                   `json:"reasoning_effort"`
 	ServiceTier         string                   `json:"service_tier"`
 	ResponseServiceTier string                   `json:"response_service_tier,omitempty"`
+	ClientOriginator    string                   `json:"client_originator,omitempty"`
+	ClientUserAgent     string                   `json:"client_user_agent,omitempty"`
 }
 
 type requestDetail struct {
