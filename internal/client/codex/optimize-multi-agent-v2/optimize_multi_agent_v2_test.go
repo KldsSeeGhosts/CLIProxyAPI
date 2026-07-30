@@ -418,6 +418,22 @@ func TestOptimizeCodexMultiAgentV2RequestNormalizesAgentMessageContentOnly(t *te
 	}
 }
 
+func TestOptimizeCodexMultiAgentV2RequestLeavesOrdinaryResponsesUnchanged(t *testing.T) {
+	t.Parallel()
+
+	payload := []byte(`{"model":"gpt-5.4","input":[{"type":"message","role":"user","content":[{"type":"input_text","text":"ordinary request"}]}],"tools":[{"type":"function","name":"lookup_weather","description":"Look up weather."}],"stream":true}`)
+	headers := http.Header{"User-Agent": []string{"Codex Desktop/0.146.0-alpha.3"}}
+	cfg := &config.Config{Codex: config.CodexConfig{OptimizeMultiAgentV2: true}}
+
+	got, optimized := OptimizeCodexMultiAgentV2Request(context.Background(), headers, payload, cfg)
+	if optimized {
+		t.Fatal("ordinary Responses request unexpectedly optimized")
+	}
+	if string(got) != string(payload) {
+		t.Fatalf("ordinary Responses request changed: %s", got)
+	}
+}
+
 func TestRestoreCodexMultiAgentV2Response(t *testing.T) {
 	t.Parallel()
 
