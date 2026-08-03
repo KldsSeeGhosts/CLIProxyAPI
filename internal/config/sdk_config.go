@@ -67,6 +67,9 @@ type SDKConfig struct {
 type ClaudeCodeConfig struct {
 	// DisableCloakingModelList disables model ID cloaking in Anthropic model list responses.
 	DisableCloakingModelList bool `yaml:"disable-cloaking-model-list" json:"disable-cloaking-model-list"`
+	// ModelAllowlist limits Anthropic model list responses to the configured IDs.
+	// It does not change which models can be addressed directly.
+	ModelAllowlist []string `yaml:"model-allowlist,omitempty" json:"model-allowlist,omitempty"`
 }
 
 // StreamingConfig holds server streaming behavior configuration.

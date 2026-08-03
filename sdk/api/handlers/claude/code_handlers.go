@@ -55,9 +55,32 @@ func (h *ClaudeCodeAPIHandler) HandlerType() string {
 
 // Models returns a list of models supported by this handler.
 func (h *ClaudeCodeAPIHandler) Models() []map[string]any {
-	// Get dynamic models from the global registry
-	modelRegistry := registry.GetGlobalRegistry()
-	return modelRegistry.GetAvailableModels("claude")
+	// Get dynamic models from the global registry.
+	models := registry.GetGlobalRegistry().GetAvailableModels("claude")
+	if h.Cfg == nil || len(h.Cfg.ClaudeCode.ModelAllowlist) == 0 {
+		return models
+	}
+
+	allowed := make(map[string]struct{}, len(h.Cfg.ClaudeCode.ModelAllowlist))
+	for _, modelID := range h.Cfg.ClaudeCode.ModelAllowlist {
+		if modelID = strings.TrimSpace(modelID); modelID != "" {
+			allowed[modelID] = struct{}{}
+		}
+	}
+	if len(allowed) == 0 {
+		return models
+	}
+
+	filtered := make([]map[string]any, 0, len(models))
+	for _, model := range models {
+		modelID, ok := model["id"].(string)
+		if ok {
+			if _, allowed := allowed[modelID]; allowed {
+				filtered = append(filtered, model)
+			}
+		}
+	}
+	return filtered
 }
 
 // ClaudeMessages handles Claude-compatible streaming chat completions.

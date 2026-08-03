@@ -173,6 +173,11 @@ disable-claude-cloak-mode: false
 claude-code:
   # When true, return original model IDs in Anthropic model list responses instead of cloaked IDs.
   disable-cloaking-model-list: false
+  # Optional exact IDs to expose in Anthropic model list responses. This only
+  # changes discovery; direct requests are still routed normally.
+  # model-allowlist:
+  #   - claude-fable-5
+  #   - gpt-5.6-luna
 
 # disable-image-generation supports: false (default), true, "chat", or "passthrough".
 # - true: disable image_generation everywhere (also returns 404 for /v1/images/generations and /v1/images/edits).
