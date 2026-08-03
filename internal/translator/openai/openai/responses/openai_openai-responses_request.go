@@ -76,6 +76,7 @@ func ConvertOpenAIResponsesRequestToOpenAIChatCompletions(modelName string, inpu
 		pendingToolCalls := make([]interface{}, 0)
 		pendingToolCallIDs := make([]string, 0)
 		pendingReasoningContent := ""
+		lastAssistantReasoningContent := ""
 		awaitingToolOutputs := make(map[string]struct{})
 		deferredMessages := make([][]byte, 0)
 
@@ -88,12 +89,21 @@ func ConvertOpenAIResponsesRequestToOpenAIChatCompletions(modelName string, inpu
 			if len(pendingToolCalls) == 0 {
 				return
 			}
+			reasoningContent := takePendingReasoningContent()
+			// Responses histories can place an assistant message between a
+			// reasoning item and its following tool calls. DeepSeek's thinking
+			// API requires reasoning_content on the assistant tool-call message,
+			// so preserve the preceding assistant reasoning for that message too.
+			if reasoningContent == "" && isDeepSeekModel(modelName) {
+				reasoningContent = lastAssistantReasoningContent
+			}
 			assistantMessage := []byte(`{"role":"assistant","tool_calls":[]}`)
 			assistantMessage, _ = sjson.SetBytes(assistantMessage, "tool_calls", pendingToolCalls)
-			if reasoningContent := takePendingReasoningContent(); reasoningContent != "" {
+			if reasoningContent != "" {
 				assistantMessage, _ = sjson.SetBytes(assistantMessage, "reasoning_content", reasoningContent)
 			}
 			appendMessage(assistantMessage)
+			lastAssistantReasoningContent = ""
 			for _, id := range pendingToolCallIDs {
 				if strings.TrimSpace(id) == "" {
 					continue
@@ -154,6 +164,7 @@ func ConvertOpenAIResponsesRequestToOpenAIChatCompletions(modelName string, inpu
 				}
 				if role != "assistant" {
 					appendPendingReasoningMessage()
+					lastAssistantReasoningContent = ""
 				}
 				message := []byte(`{"role":"","content":[]}`)
 				message, _ = sjson.SetBytes(message, "role", role)
@@ -198,6 +209,7 @@ func ConvertOpenAIResponsesRequestToOpenAIChatCompletions(modelName string, inpu
 					if reasoningContent != "" {
 						message, _ = sjson.SetBytes(message, "reasoning_content", reasoningContent)
 					}
+					lastAssistantReasoningContent = reasoningContent
 				}
 
 				appendRegularMessage(message)
@@ -255,6 +267,7 @@ func ConvertOpenAIResponsesRequestToOpenAIChatCompletions(modelName string, inpu
 				if len(awaitingToolOutputs) == 0 && len(deferredMessages) > 0 {
 					flushDeferredMessages()
 				}
+				lastAssistantReasoningContent = ""
 
 			case "custom_tool_call":
 				// Codex freeform tool call replay: wrap the raw input so it
@@ -282,6 +295,7 @@ func ConvertOpenAIResponsesRequestToOpenAIChatCompletions(modelName string, inpu
 				if len(awaitingToolOutputs) == 0 && len(deferredMessages) > 0 {
 					flushDeferredMessages()
 				}
+				lastAssistantReasoningContent = ""
 			}
 
 		}
@@ -489,4 +503,8 @@ func collectOpenAIResponsesReasoningContent(item gjson.Result) string {
 		return "[reasoning unavailable]"
 	}
 	return reasoningText.String()
+}
+
+func isDeepSeekModel(modelName string) bool {
+	return strings.Contains(strings.ToLower(strings.TrimSpace(modelName)), "deepseek")
 }

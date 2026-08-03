@@ -333,6 +333,45 @@ func TestConvertOpenAIResponsesRequestToOpenAIChatCompletions_AttachesReasoningT
 	}
 }
 
+func TestConvertOpenAIResponsesRequestToOpenAIChatCompletions_ReusesReasoningForDeepSeekToolCallAfterAssistantMessage(t *testing.T) {
+	raw := []byte(`{
+		"input": [
+			{
+				"type": "reasoning",
+				"id": "rs_text_then_tool",
+				"summary": [{"type": "summary_text", "text": "inspect the workspace"}]
+			},
+			{
+				"type": "message",
+				"role": "assistant",
+				"content": [{"type": "output_text", "text": "I will inspect the workspace."}]
+			},
+			{"type": "custom_tool_call", "call_id": "call_1", "name": "exec", "input": "{\\"cmd\\":\\"pwd\\"}"},
+			{"type": "custom_tool_call_output", "call_id": "call_1", "output": "ok"}
+		]
+	}`)
+	t.Logf("input json:\n%s", prettyJSONForTest(raw))
+
+	out := ConvertOpenAIResponsesRequestToOpenAIChatCompletions("opencode/deepseek-v4-flash-free", raw, true)
+	t.Logf("output json:\n%s", prettyJSONForTest(out))
+
+	if got := gjson.GetBytes(out, "messages.#").Int(); got != 3 {
+		t.Fatalf("messages count = %d, want 3; output=%s", got, out)
+	}
+	if got := gjson.GetBytes(out, "messages.0.reasoning_content").String(); got != "inspect the workspace" {
+		t.Fatalf("text message reasoning_content = %q, want %q; output=%s", got, "inspect the workspace", out)
+	}
+	if got := gjson.GetBytes(out, "messages.1.reasoning_content").String(); got != "inspect the workspace" {
+		t.Fatalf("tool message reasoning_content = %q, want %q; output=%s", got, "inspect the workspace", out)
+	}
+	if got := gjson.GetBytes(out, "messages.1.tool_calls.0.id").String(); got != "call_1" {
+		t.Fatalf("tool call id = %q, want %q; output=%s", got, "call_1", out)
+	}
+	if got := gjson.GetBytes(out, "messages.2.role").String(); got != "tool" {
+		t.Fatalf("tool output role = %q, want tool; output=%s", got, out)
+	}
+}
+
 func TestConvertOpenAIResponsesRequestToOpenAIChatCompletions_KeepsReasoningBeforeUserMessage(t *testing.T) {
 	raw := []byte(`{
 		"input": [
