@@ -347,6 +347,26 @@ func TestConvertClaudeRequestToOpenAI_UnsignedThinkingOnlyMessageDropped(t *test
 	}
 }
 
+func TestConvertClaudeRequestToOpenAI_DeepSeekReasoningReplay(t *testing.T) {
+	inputJSON := `{
+		"model": "claude-fable-5-dd-eerf-hsalf-4v-keespeed/edocnepo",
+		"messages": [
+			{"role": "user", "content": [{"type": "text", "text": "Continue"}]},
+			{"role": "assistant", "content": [{"type": "thinking", "thinking": "Provider reasoning must be replayed."}, {"type": "text", "text": "Previous answer"}]},
+			{"role": "user", "content": [{"type": "text", "text": "Follow up"}]}
+		]
+	}`
+
+	result := ConvertClaudeRequestToOpenAI("deepseek-v4-flash-free", []byte(inputJSON), false)
+	assistantMsg := gjson.GetBytes(result, "messages.1")
+	if got := assistantMsg.Get("reasoning_content").String(); got != "Provider reasoning must be replayed." {
+		t.Fatalf("reasoning_content = %q, want replayed provider reasoning; output: %s", got, string(result))
+	}
+	if got := assistantMsg.Get("content.0.text").String(); got != "Previous answer" {
+		t.Fatalf("visible content = %q, want Previous answer; output: %s", got, string(result))
+	}
+}
+
 func validGPTChatReasoningSignature() string {
 	raw := make([]byte, 1+8+16+16+32)
 	raw[0] = 0x80
