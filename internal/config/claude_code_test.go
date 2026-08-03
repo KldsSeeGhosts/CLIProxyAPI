@@ -32,3 +32,19 @@ func TestParseConfigBytesClaudeCodeModelListCloaking(t *testing.T) {
 		})
 	}
 }
+
+func TestParseConfigBytesClaudeCodeModelAllowlist(t *testing.T) {
+	cfg, errParse := ParseConfigBytes([]byte("claude-code:\n  model-allowlist:\n    - claude-fable-5\n    - gpt-5.6-luna\n"))
+	if errParse != nil {
+		t.Fatalf("ParseConfigBytes() error = %v", errParse)
+	}
+	want := []string{"claude-fable-5", "gpt-5.6-luna"}
+	if len(cfg.ClaudeCode.ModelAllowlist) != len(want) {
+		t.Fatalf("ModelAllowlist length = %d, want %d", len(cfg.ClaudeCode.ModelAllowlist), len(want))
+	}
+	for i, modelID := range want {
+		if got := cfg.ClaudeCode.ModelAllowlist[i]; got != modelID {
+			t.Fatalf("ModelAllowlist[%d] = %q, want %q", i, got, modelID)
+		}
+	}
+}

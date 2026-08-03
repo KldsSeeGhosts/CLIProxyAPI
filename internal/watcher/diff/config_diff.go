@@ -57,6 +57,9 @@ func BuildConfigChangeDetails(oldCfg, newCfg *config.Config) []string {
 	if oldCfg.ClaudeCode.DisableCloakingModelList != newCfg.ClaudeCode.DisableCloakingModelList {
 		changes = append(changes, fmt.Sprintf("claude-code.disable-cloaking-model-list: %t -> %t", oldCfg.ClaudeCode.DisableCloakingModelList, newCfg.ClaudeCode.DisableCloakingModelList))
 	}
+	if !reflect.DeepEqual(oldCfg.ClaudeCode.ModelAllowlist, newCfg.ClaudeCode.ModelAllowlist) {
+		changes = append(changes, fmt.Sprintf("claude-code.model-allowlist count: %d -> %d", len(oldCfg.ClaudeCode.ModelAllowlist), len(newCfg.ClaudeCode.ModelAllowlist)))
+	}
 	if oldCfg.DisableImageGeneration != newCfg.DisableImageGeneration {
 		changes = append(changes, fmt.Sprintf("disable-image-generation: %v -> %v", oldCfg.DisableImageGeneration, newCfg.DisableImageGeneration))
 	}
