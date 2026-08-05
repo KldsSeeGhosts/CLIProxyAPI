@@ -113,6 +113,45 @@ func TestCodexContinuationPassInstruction(t *testing.T) {
 			wantOK:       false,
 		},
 		{
+			name: "narrated commit without call",
+			lines: []string{
+				`data: {"choices":[{"index":0,"delta":{"content":"Gate green (exit 0). Committing ERM-231 and closing it in Linear:"}}]}`,
+				`data: {"choices":[{"index":0,"delta":{},"finish_reason":"stop"}]}`,
+			},
+			toolsOffered: true,
+			wantOK:       true,
+			wantInstr:    codexContinuationAnnouncedCallInstruction,
+		},
+		{
+			name: "narrated run split across deltas",
+			lines: []string{
+				`data: {"choices":[{"index":0,"delta":{"content":"Volta reports complete. Running the parent"}}]}`,
+				`data: {"choices":[{"index":0,"delta":{"content":" gate: scope, full suite, and a security-focused diff review:"}}]}`,
+				`data: {"choices":[{"index":0,"delta":{},"finish_reason":"stop"}]}`,
+			},
+			toolsOffered: true,
+			wantOK:       true,
+			wantInstr:    codexContinuationAnnouncedCallInstruction,
+		},
+		{
+			name: "trailing clause without action stays complete",
+			lines: []string{
+				`data: {"choices":[{"index":0,"delta":{"content":"Summary of the change. The results:"}}]}`,
+				`data: {"choices":[{"index":0,"delta":{},"finish_reason":"stop"}]}`,
+			},
+			toolsOffered: true,
+			wantOK:       false,
+		},
+		{
+			name: "earlier participle with clean ending stays complete",
+			lines: []string{
+				`data: {"choices":[{"index":0,"delta":{"content":"The suite is running. All checks pass:"}}]}`,
+				`data: {"choices":[{"index":0,"delta":{},"finish_reason":"stop"}]}`,
+			},
+			toolsOffered: true,
+			wantOK:       false,
+		},
+		{
 			name: "tool call emitted",
 			lines: []string{
 				`data: {"choices":[{"index":0,"delta":{"tool_calls":[{"index":0,"id":"call_1","function":{"name":"spawn_agent"}}]}}]}`,
