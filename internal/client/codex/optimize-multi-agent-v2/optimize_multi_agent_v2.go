@@ -229,6 +229,15 @@ func isCodexMultiAgentClient(userAgent string) bool {
 	return false
 }
 
+// IsCodexClientRequest reports whether the request originates from the
+// official Codex client family (Desktop, TUI, exec, iOS remote, t3code),
+// resolved from the gin context when present and falling back to the supplied
+// headers. It shares the explicit multi-agent client allowlist so
+// Codex-specific gateway behaviors agree on what counts as a Codex surface.
+func IsCodexClientRequest(ctx context.Context, headers http.Header) bool {
+	return isCodexMultiAgentClient(codexClientUserAgent(ctx, headers))
+}
+
 func codexSpawnAgentModelsForRequest(ctx context.Context, headers http.Header, homeEnabled bool) []codexSpawnAgentModel {
 	availableModels := registry.GetGlobalRegistry().GetAvailableModels("openai")
 	if homeEnabled {

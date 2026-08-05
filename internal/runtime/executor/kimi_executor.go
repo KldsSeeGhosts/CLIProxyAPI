@@ -266,37 +266,39 @@ func (e *KimiExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.Aut
 	reporter.SetTranslatedReasoningEffort(body, e.Identifier())
 
 	url := kimiauth.KimiAPIBaseURL + "/v1/chat/completions"
-	httpReq, err := http.NewRequestWithContext(ctx, http.MethodPost, url, bytes.NewReader(body))
-	if err != nil {
-		return nil, err
-	}
-	applyKimiHeadersWithAuth(httpReq, token, true, auth)
 	var attrs map[string]string
 	if auth != nil {
 		attrs = auth.Attributes
 	}
-	util.ApplyCustomHeadersFromAttrs(httpReq, attrs)
 	var authID, authLabel, authType, authValue string
 	if auth != nil {
 		authID = auth.ID
 		authLabel = auth.Label
 		authType, authValue = auth.AccountInfo()
 	}
-	helps.RecordAPIRequest(ctx, e.cfg, helps.UpstreamRequestLog{
-		URL:       url,
-		Method:    http.MethodPost,
-		Headers:   httpReq.Header.Clone(),
-		Body:      body,
-		Provider:  e.Identifier(),
-		AuthID:    authID,
-		AuthLabel: authLabel,
-		AuthType:  authType,
-		AuthValue: authValue,
-	})
-
 	httpClient := helps.NewProxyAwareHTTPClient(ctx, e.cfg, auth, 0)
 	httpClient = reporter.TrackHTTPClient(httpClient)
-	httpResp, err := httpClient.Do(httpReq)
+	startStream := func(reqBody []byte) (*http.Response, error) {
+		streamReq, errReq := http.NewRequestWithContext(ctx, http.MethodPost, url, bytes.NewReader(reqBody))
+		if errReq != nil {
+			return nil, errReq
+		}
+		applyKimiHeadersWithAuth(streamReq, token, true, auth)
+		util.ApplyCustomHeadersFromAttrs(streamReq, attrs)
+		helps.RecordAPIRequest(ctx, e.cfg, helps.UpstreamRequestLog{
+			URL:       url,
+			Method:    http.MethodPost,
+			Headers:   streamReq.Header.Clone(),
+			Body:      reqBody,
+			Provider:  e.Identifier(),
+			AuthID:    authID,
+			AuthLabel: authLabel,
+			AuthType:  authType,
+			AuthValue: authValue,
+		})
+		return httpClient.Do(streamReq)
+	}
+	httpResp, err := startStream(body)
 	if err != nil {
 		helps.RecordAPIResponseError(ctx, e.cfg, err)
 		return nil, err
@@ -315,45 +317,108 @@ func (e *KimiExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.Aut
 	out := make(chan cliproxyexecutor.StreamChunk)
 	go func() {
 		defer close(out)
-		defer func() {
-			if errClose := httpResp.Body.Close(); errClose != nil {
-				log.Errorf("kimi executor: close response body error: %v", errClose)
-			}
-		}()
-		scanner := bufio.NewScanner(httpResp.Body)
-		scanner.Buffer(nil, 1_048_576) // 1MB
 		claudeInputTokens := helps.NewClaudeInputTokenState(from, to, responseFormat, originalPayload)
 		var param any
 		var streamUsage helps.StreamUsageBuffer
 		defer streamUsage.Publish(ctx, reporter)
-		for scanner.Scan() {
-			line := scanner.Bytes()
-			helps.AppendAPIResponseChunk(ctx, e.cfg, line)
-			streamUsage.ObserveOpenAIStream(line)
-			chunks := helps.TranslateStreamWithClaudeInputTokens(ctx, to, responseFormat, req.Model, opts.OriginalRequest, body, bytes.Clone(line), &param, claudeInputTokens)
-			for i := range chunks {
+		cont, contOK := newCodexContinuationController(ctx, opts.Headers, e.cfg, req.Model, responseFormat, body)
+		currentBody := body
+		passResp := httpResp
+		flushDone := func() bool {
+			doneChunks := helps.TranslateStreamWithClaudeInputTokens(ctx, to, responseFormat, req.Model, opts.OriginalRequest, currentBody, []byte("[DONE]"), &param, claudeInputTokens)
+			for i := range doneChunks {
 				select {
-				case out <- cliproxyexecutor.StreamChunk{Payload: chunks[i]}:
+				case out <- cliproxyexecutor.StreamChunk{Payload: doneChunks[i]}:
 				case <-ctx.Done():
-					return
+					return false
 				}
 			}
+			return true
 		}
-		doneChunks := helps.TranslateStreamWithClaudeInputTokens(ctx, to, responseFormat, req.Model, opts.OriginalRequest, body, []byte("[DONE]"), &param, claudeInputTokens)
-		for i := range doneChunks {
-			select {
-			case out <- cliproxyexecutor.StreamChunk{Payload: doneChunks[i]}:
-			case <-ctx.Done():
+		for {
+			scanner := bufio.NewScanner(passResp.Body)
+			scanner.Buffer(nil, 1_048_576) // 1MB
+			continueUpstream := false
+			aborted := false
+			for scanner.Scan() {
+				line := scanner.Bytes()
+				helps.AppendAPIResponseChunk(ctx, e.cfg, line)
+				streamUsage.ObserveOpenAIStream(line)
+				if contOK {
+					cont.observe(line)
+					if cont.isUpstreamDoneLine(line) && cont.shouldContinue() {
+						// Stall detected at the terminal marker: do not translate
+						// [DONE] (it would emit the single downstream terminal
+						// event); continue the turn upstream first.
+						continueUpstream = true
+						break
+					}
+					line = cont.offsetLine(line)
+				}
+				chunks := helps.TranslateStreamWithClaudeInputTokens(ctx, to, responseFormat, req.Model, opts.OriginalRequest, currentBody, bytes.Clone(line), &param, claudeInputTokens)
+				for i := range chunks {
+					select {
+					case out <- cliproxyexecutor.StreamChunk{Payload: chunks[i]}:
+					case <-ctx.Done():
+						aborted = true
+						break
+					}
+				}
+				if aborted {
+					break
+				}
+			}
+			if errClose := passResp.Body.Close(); errClose != nil {
+				log.Errorf("kimi executor: close response body error: %v", errClose)
+			}
+			if aborted {
 				return
 			}
-		}
-		if errScan := scanner.Err(); errScan != nil {
-			helps.RecordAPIResponseError(ctx, e.cfg, errScan)
-			reporter.PublishFailure(ctx, errScan)
-			select {
-			case out <- cliproxyexecutor.StreamChunk{Err: errScan}:
-			case <-ctx.Done():
+			scanErr := scanner.Err()
+			if !continueUpstream {
+				if !flushDone() {
+					return
+				}
+				if scanErr != nil {
+					helps.RecordAPIResponseError(ctx, e.cfg, scanErr)
+					reporter.PublishFailure(ctx, scanErr)
+					select {
+					case out <- cliproxyexecutor.StreamChunk{Err: scanErr}:
+					case <-ctx.Done():
+					}
+				}
+				return
 			}
+			nextBody, okNext := cont.continuationBody(currentBody)
+			if !okNext {
+				flushDone()
+				return
+			}
+			log.Infof("kimi executor: continuing stalled Codex turn without a tool call (model %s, pass %d)", req.Model, cont.passIndex+1)
+			nextResp, errNext := startStream(nextBody)
+			if errNext == nil {
+				helps.RecordAPIResponseMetadata(ctx, e.cfg, nextResp.StatusCode, nextResp.Header.Clone())
+				if nextResp.StatusCode < 200 || nextResp.StatusCode >= 300 {
+					b, _ := io.ReadAll(nextResp.Body)
+					helps.AppendAPIResponseChunk(ctx, e.cfg, b)
+					if errClose := nextResp.Body.Close(); errClose != nil {
+						log.Errorf("kimi executor: close continuation response body error: %v", errClose)
+					}
+					log.Warnf("kimi executor: semantic continuation upstream status %d; ending turn with first-pass output", nextResp.StatusCode)
+					errNext = statusErr{code: nextResp.StatusCode, msg: string(b)}
+				}
+			} else {
+				helps.RecordAPIResponseError(ctx, e.cfg, errNext)
+				log.Warnf("kimi executor: semantic continuation request failed: %v", errNext)
+			}
+			if errNext != nil {
+				// Degrade gracefully: the client still receives a well-formed
+				// terminal event covering the first-pass output.
+				flushDone()
+				return
+			}
+			currentBody = nextBody
+			passResp = nextResp
 		}
 	}()
 	return &cliproxyexecutor.StreamResult{Headers: httpResp.Header.Clone(), Chunks: out}, nil

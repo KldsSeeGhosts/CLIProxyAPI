@@ -138,8 +138,31 @@ type CodexConfig struct {
 	DisableCodexCloaking bool `yaml:"disable-codex-cloaking" json:"disable-codex-cloaking"`
 	// OptimizeMultiAgentV2 optimizes official Codex multi-agent requests.
 	OptimizeMultiAgentV2 bool `yaml:"optimize-multi-agent-v2" json:"optimize-multi-agent-v2"`
+	// SemanticContinuation auto-continues Codex turns on opted-in non-GPT routes
+	// that end without an actual tool call.
+	SemanticContinuation CodexSemanticContinuationConfig `yaml:"semantic-continuation" json:"semantic-continuation"`
 	// LiveMediaRelay terminates and relays Codex Live WebRTC media in this process.
 	LiveMediaRelay CodexLiveMediaRelayConfig `yaml:"live-media-relay" json:"live-media-relay"`
+}
+
+// CodexSemanticContinuationConfig configures server-side continuation of Codex
+// turns on translated (non-GPT) Chat Completions routes. Non-GPT models
+// intermittently end a turn with prose announcing a tool call, or with an
+// empty success, instead of emitting the call; the official Codex clients then
+// treat the turn as complete and silently halt the agent loop. When a route is
+// opted in via Models and the client belongs to the official Codex family, the
+// gateway issues a bounded number of instructed continuation requests upstream
+// and folds the resulting output items into the same downstream Responses
+// stream, so the model gets one more chance to emit the call it announced.
+type CodexSemanticContinuationConfig struct {
+	// Enabled toggles the continuation behavior. Default false.
+	Enabled bool `yaml:"enabled" json:"enabled"`
+	// Models lists '*' wildcard patterns matched against the routed model ID
+	// (for example "kimi-*" or "devin/*"). Empty disables every route.
+	Models []string `yaml:"models" json:"models"`
+	// MaxContinuations bounds continuation round trips per client turn.
+	// Zero or negative falls back to 1.
+	MaxContinuations int `yaml:"max-continuations" json:"max-continuations"`
 }
 
 // CodexLiveMediaRelayConfig configures the in-process Codex Live WebRTC gateway.
