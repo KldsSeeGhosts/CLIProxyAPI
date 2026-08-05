@@ -335,25 +335,53 @@ func (e *KimiExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.Aut
 			}
 			return true
 		}
+		emitFailure := func(decision codexContinuationDecision) {
+			streamErr := decision.err
+			if streamErr == nil {
+				streamErr = newCodexTerminalIntegrityError(decision.classification, "terminal arbiter rejected the upstream boundary")
+			}
+			log.Warnf("kimi executor: codex terminal arbiter model=%s boundary_class=%s outcome=%s pass=%d: %v", req.Model, decision.classification, decision.outcome, cont.passIndex, streamErr)
+			helps.RecordAPIResponseError(ctx, e.cfg, streamErr)
+			reporter.PublishFailure(ctx, streamErr)
+			select {
+			case out <- cliproxyexecutor.StreamChunk{Err: streamErr}:
+			case <-ctx.Done():
+			}
+		}
 		for {
 			scanner := bufio.NewScanner(passResp.Body)
 			scanner.Buffer(nil, 1_048_576) // 1MB
 			continueUpstream := false
+			terminalForwarded := false
 			aborted := false
+			failed := false
 			for scanner.Scan() {
 				line := scanner.Bytes()
 				helps.AppendAPIResponseChunk(ctx, e.cfg, line)
 				streamUsage.ObserveOpenAIStream(line)
+				upstreamDone := isCodexUpstreamDoneLine(line)
 				if contOK {
 					cont.observe(line)
-					if cont.isUpstreamDoneLine(line) && cont.shouldContinue() {
-						// Stall detected at the terminal marker: do not translate
-						// [DONE] (it would emit the single downstream terminal
-						// event); continue the turn upstream first.
-						continueUpstream = true
-						break
+					if upstreamDone {
+						decision := cont.decide(codexContinuationBoundaryExplicitDone, nil)
+						log.Infof("kimi executor: codex terminal arbiter model=%s boundary=%s classification=%s outcome=%s pass=%d", req.Model, codexContinuationBoundaryExplicitDone, decision.classification, decision.outcome, cont.passIndex)
+						switch decision.outcome {
+						case codexContinuationOutcomeContinue:
+							continueUpstream = true
+							break
+						case codexContinuationOutcomeFail:
+							emitFailure(decision)
+							failed = true
+							break
+						case codexContinuationOutcomeComplete:
+							line = cont.offsetLine(line)
+						}
+					} else {
+						line = cont.offsetLine(line)
 					}
-					line = cont.offsetLine(line)
+				}
+				if continueUpstream || failed {
+					break
 				}
 				chunks := helps.TranslateStreamWithClaudeInputTokens(ctx, to, responseFormat, req.Model, opts.OriginalRequest, currentBody, bytes.Clone(line), &param, claudeInputTokens)
 				for i := range chunks {
@@ -367,34 +395,65 @@ func (e *KimiExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.Aut
 				if aborted {
 					break
 				}
+				if upstreamDone {
+					terminalForwarded = true
+					break
+				}
 			}
 			if errClose := passResp.Body.Close(); errClose != nil {
 				log.Errorf("kimi executor: close response body error: %v", errClose)
 			}
-			if aborted {
+			if aborted || failed {
+				return
+			}
+			if terminalForwarded {
 				return
 			}
 			scanErr := scanner.Err()
 			if !continueUpstream {
-				if !flushDone() {
+				if scanErr != nil {
+					if contOK {
+						emitFailure(cont.decide(codexContinuationBoundaryReadError, scanErr))
+					} else {
+						helps.RecordAPIResponseError(ctx, e.cfg, scanErr)
+						reporter.PublishFailure(ctx, scanErr)
+						select {
+						case out <- cliproxyexecutor.StreamChunk{Err: scanErr}:
+						case <-ctx.Done():
+						}
+					}
 					return
 				}
-				if scanErr != nil {
-					helps.RecordAPIResponseError(ctx, e.cfg, scanErr)
-					reporter.PublishFailure(ctx, scanErr)
-					select {
-					case out <- cliproxyexecutor.StreamChunk{Err: scanErr}:
-					case <-ctx.Done():
+				if contOK {
+					decision := cont.decide(codexContinuationBoundaryCleanEOF, nil)
+					log.Infof("kimi executor: codex terminal arbiter model=%s boundary=%s classification=%s outcome=%s pass=%d", req.Model, codexContinuationBoundaryCleanEOF, decision.classification, decision.outcome, cont.passIndex)
+					switch decision.outcome {
+					case codexContinuationOutcomeContinue:
+						continueUpstream = true
+					case codexContinuationOutcomeFail:
+						emitFailure(decision)
+						return
+					case codexContinuationOutcomeComplete:
+						if !flushDone() {
+							return
+						}
+						return
 					}
+				} else {
+					flushDone()
+					return
 				}
-				return
 			}
 			nextBody, okNext := cont.continuationBody(currentBody)
 			if !okNext {
-				flushDone()
+				emitFailure(codexContinuationDecision{
+					outcome:        codexContinuationOutcomeFail,
+					classification: "continuation_state_error",
+					err:            newCodexTerminalIntegrityError("continuation_state_error", "terminal arbiter selected continuation but no continuation body could be built"),
+				})
 				return
 			}
-			log.Infof("kimi executor: continuing stalled Codex turn without a tool call (model %s, pass %d)", req.Model, cont.passIndex+1)
+			log.Infof("kimi executor: continuing stalled Codex turn without a tool call (model %s, pass %d)", req.Model, cont.passIndex)
 			nextResp, errNext := startStream(nextBody)
 			if errNext == nil {
 				helps.RecordAPIResponseMetadata(ctx, e.cfg, nextResp.StatusCode, nextResp.Header.Clone())
@@ -404,17 +463,18 @@ func (e *KimiExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.Aut
 					if errClose := nextResp.Body.Close(); errClose != nil {
 						log.Errorf("kimi executor: close continuation response body error: %v", errClose)
 					}
-					log.Warnf("kimi executor: semantic continuation upstream status %d; ending turn with first-pass output", nextResp.StatusCode)
 					errNext = statusErr{code: nextResp.StatusCode, msg: string(b)}
 				}
-			} else {
-				helps.RecordAPIResponseError(ctx, e.cfg, errNext)
-				log.Warnf("kimi executor: semantic continuation request failed: %v", errNext)
 			}
 			if errNext != nil {
-				// Degrade gracefully: the client still receives a well-formed
-				// terminal event covering the first-pass output.
-				flushDone()
+				emitFailure(codexContinuationDecision{
+					outcome:        codexContinuationOutcomeFail,
+					classification: "continuation_request_failed",
+					err: &codexTerminalIntegrityError{
+						classification: "continuation_request_failed",
+						cause:          fmt.Errorf("semantic continuation request failed: %w", errNext),
+					},
+				})
 				return
 			}
 			currentBody = nextBody

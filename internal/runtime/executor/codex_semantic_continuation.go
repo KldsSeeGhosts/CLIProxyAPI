@@ -3,6 +3,7 @@ package executor
 import (
 	"bytes"
 	"context"
+	"errors"
 	"fmt"
 	"net/http"
 	"strings"
@@ -14,43 +15,92 @@ import (
 	"github.com/tidwall/sjson"
 )
 
-// codexSemanticContinuationMaxText bounds the assistant text accumulated per
-// pass. A model that produced more than this wrote a full reply, not a stalled
-// announcement; continuation is disabled for that pass.
 const codexSemanticContinuationMaxText = 32 * 1024
 
-// codexContinuationEmptyTurnInstruction is sent when the model ended its turn
-// with neither visible text nor a tool call while tools were offered.
 const codexContinuationEmptyTurnInstruction = "Your previous reply was empty. Continue the unfinished turn now: if the next action is a tool call, emit it as an actual tool call with no surrounding prose."
-
-// codexContinuationAnnouncedCallInstruction is sent when the model narrated a
-// tool call in prose (for example "Spawning the final task:") but never
-// emitted the call, which makes official Codex clients end the turn.
 const codexContinuationAnnouncedCallInstruction = "You announced a tool call in prose but did not emit one. Emit the intended tool call now as an actual tool call, with no surrounding prose."
 
-// codexContinuationAnnouncementVerbs are the Codex tool-action verbs that,
-// combined with a trailing announcement suffix, mark prose as a narrated tool
-// call rather than a legitimate final answer.
 var codexContinuationAnnouncementVerbs = []string{
 	"spawn", "wait_agent", "list_agents", "send_input", "close_agent",
-	"exec_command", "write_stdin", "update_plan", "tool call", "tool_call",
+	"exec_command", "write_stdin", "update_plan", "apply_patch",
+	"tool call", "tool_call",
 }
 
-// codexContinuationAnnouncementSuffixes are the trailing characters typical of
-// a prose tool-call announcement ("Spawning the final task:", "Running the
-// tests —"). Matched against the trimmed reply text.
-var codexContinuationAnnouncementSuffixes = []string{":", "：", "—", "–", "-"}
+var codexContinuationAnnouncementSuffixes = []string{":", "：", "—", "–", "-", "…", "..."}
 
-// codexContinuationPass tracks one upstream Chat Completions pass for the
-// continuation decision.
+type codexContinuationBoundary uint8
+
+const (
+	codexContinuationBoundaryExplicitDone codexContinuationBoundary = iota + 1
+	codexContinuationBoundaryCleanEOF
+	codexContinuationBoundaryReadError
+)
+
+func (b codexContinuationBoundary) String() string {
+	switch b {
+	case codexContinuationBoundaryExplicitDone:
+		return "explicit_done"
+	case codexContinuationBoundaryCleanEOF:
+		return "clean_eof"
+	case codexContinuationBoundaryReadError:
+		return "read_error"
+	default:
+		return "unknown"
+	}
+}
+
+type codexContinuationOutcome uint8
+
+const (
+	codexContinuationOutcomeComplete codexContinuationOutcome = iota + 1
+	codexContinuationOutcomeContinue
+	codexContinuationOutcomeFail
+)
+
+func (o codexContinuationOutcome) String() string {
+	switch o {
+	case codexContinuationOutcomeComplete:
+		return "complete"
+	case codexContinuationOutcomeContinue:
+		return "continue"
+	case codexContinuationOutcomeFail:
+		return "fail"
+	default:
+		return "unknown"
+	}
+}
+
+type codexContinuationDecision struct {
+	outcome        codexContinuationOutcome
+	classification string
+	instruction    string
+	err            error
+}
+
+type codexTerminalIntegrityError struct {
+	classification string
+	cause          error
+}
+
+func (e *codexTerminalIntegrityError) Error() string {
+	return fmt.Sprintf("codex terminal integrity [%s]: %v", e.classification, e.cause)
+}
+
+func (e *codexTerminalIntegrityError) Unwrap() error { return e.cause }
+
+func newCodexTerminalIntegrityError(classification, message string) error {
+	return &codexTerminalIntegrityError{classification: classification, cause: errors.New(message)}
+}
+
 type codexContinuationPass struct {
-	sawToolCall  bool
-	finishReason string
-	text         strings.Builder
-	overflow     bool
+	sawToolCall       bool
+	finishReason      string
+	text              strings.Builder
+	reasoning         strings.Builder
+	textOverflow      bool
+	reasoningOverflow bool
 }
 
-// observe folds one raw upstream SSE line into the pass state.
 func (p *codexContinuationPass) observe(line []byte) {
 	payload := helps.JSONPayload(line)
 	if payload == nil {
@@ -61,50 +111,86 @@ func (p *codexContinuationPass) observe(line []byte) {
 		return
 	}
 	for _, choice := range choices.Array() {
-		delta := choice.Get("delta")
-		if content := delta.Get("content"); content.Exists() && content.String() != "" {
-			if p.text.Len() >= codexSemanticContinuationMaxText {
-				p.overflow = true
-			} else {
-				p.text.WriteString(content.String())
-			}
-		}
-		if tcs := delta.Get("tool_calls"); tcs.Exists() && tcs.IsArray() && len(tcs.Array()) > 0 {
-			p.sawToolCall = true
-		}
+		p.observeMessage(choice.Get("delta"))
+		p.observeMessage(choice.Get("message"))
 		if fr := choice.Get("finish_reason"); fr.Exists() && fr.String() != "" {
 			p.finishReason = fr.String()
 		}
 	}
 }
 
-// instruction returns the continuation instruction when this pass qualifies,
-// or ok=false when the turn ended legitimately.
-func (p *codexContinuationPass) instruction(toolsOffered bool) (instruction string, ok bool) {
-	if p.sawToolCall || p.overflow || !toolsOffered {
-		return "", false
+func (p *codexContinuationPass) observeMessage(message gjson.Result) {
+	if !message.Exists() || !message.IsObject() {
+		return
 	}
-	switch p.finishReason {
-	case "", "stop":
+	p.appendString(&p.text, message.Get("content"), &p.textOverflow)
+	p.appendString(&p.reasoning, message.Get("reasoning_content"), &p.reasoningOverflow)
+	p.appendString(&p.reasoning, message.Get("reasoning"), &p.reasoningOverflow)
+	if toolCalls := message.Get("tool_calls"); toolCalls.IsArray() && len(toolCalls.Array()) > 0 {
+		p.sawToolCall = true
+	}
+	if functionCall := message.Get("function_call"); functionCall.Exists() && functionCall.Raw != "null" && functionCall.Raw != "{}" {
+		p.sawToolCall = true
+	}
+}
+
+func (p *codexContinuationPass) appendString(dst *strings.Builder, value gjson.Result, overflow *bool) {
+	if *overflow || value.Type != gjson.String || value.String() == "" {
+		return
+	}
+	remaining := codexSemanticContinuationMaxText - dst.Len()
+	if remaining <= 0 {
+		*overflow = true
+		return
+	}
+	text := value.String()
+	if len(text) > remaining {
+		dst.WriteString(text[:remaining])
+		*overflow = true
+		return
+	}
+	dst.WriteString(text)
+}
+
+func (p *codexContinuationPass) stall(toolsOffered bool, toolNameSets ...[]string) (instruction, classification string, ok bool) {
+	if p.sawToolCall || p.textOverflow || !toolsOffered {
+		return "", "", false
+	}
+	switch strings.ToLower(strings.TrimSpace(p.finishReason)) {
+	case "", "stop", "tool_calls", "function_call", "tool_call":
 	default:
-		// length / content_filter / tool_calls endings are real outcomes the
-		// client must see unchanged.
-		return "", false
+		return "", "", false
+	}
+	var toolNames []string
+	if len(toolNameSets) > 0 {
+		toolNames = toolNameSets[0]
 	}
 	text := strings.TrimSpace(p.text.String())
 	if text == "" {
-		return codexContinuationEmptyTurnInstruction, true
+		return codexContinuationEmptyTurnInstruction, "empty_no_tool", true
 	}
-	if codexContinuationAnnouncementLike(text) {
-		return codexContinuationAnnouncedCallInstruction, true
+	if codexContinuationAnnouncementLike(text, toolNames) || codexContinuationToolFinishWithoutCall(p.finishReason) {
+		return codexContinuationAnnouncedCallInstruction, "narrated_no_tool", true
 	}
-	return "", false
+	return "", "", false
 }
 
-// codexContinuationAnnouncementLike reports whether a prose-only reply reads
-// as a narrated tool call: a Codex tool-action verb plus a trailing
-// announcement suffix.
-func codexContinuationAnnouncementLike(text string) bool {
+func (p *codexContinuationPass) instruction(toolsOffered bool) (instruction string, ok bool) {
+	instruction, _, ok = p.stall(toolsOffered)
+	return instruction, ok
+}
+
+func codexContinuationToolFinishWithoutCall(finishReason string) bool {
+	switch strings.ToLower(strings.TrimSpace(finishReason)) {
+	case "tool_calls", "function_call", "tool_call":
+		return true
+	default:
+		return false
+	}
+}
+
+func codexContinuationAnnouncementLike(text string, toolNames ...[]string) bool {
+	text = strings.TrimSpace(text)
 	suffixed := false
 	for _, suffix := range codexContinuationAnnouncementSuffixes {
 		if strings.HasSuffix(text, suffix) {
@@ -121,29 +207,24 @@ func codexContinuationAnnouncementLike(text string) bool {
 			return true
 		}
 	}
+	if len(toolNames) > 0 {
+		for _, name := range toolNames[0] {
+			if name != "" && strings.Contains(lower, strings.ToLower(name)) {
+				return true
+			}
+		}
+	}
 	return false
 }
 
-// codexContinuationController drives server-side semantic continuation for one
-// downstream Codex turn. Non-GPT models behind Chat Completions translation
-// intermittently end a turn with an empty success or with prose announcing a
-// tool call instead of emitting it; official Codex clients treat both as a
-// completed turn and silently halt the agent loop. When the route opts in, the
-// controller detects the stall at the upstream terminal marker, issues a
-// bounded instructed continuation upstream, and the executor folds the extra
-// pass into the same downstream Responses stream before the single terminal
-// event is emitted.
 type codexContinuationController struct {
 	remaining    int
 	toolsOffered bool
+	toolNames    []string
 	pass         codexContinuationPass
 	passIndex    int
 }
 
-// newCodexContinuationController builds the controller for one downstream
-// stream. ok=false disables continuation entirely: feature off, route not
-// opted in, non-Codex client, non-Responses surface, or a request without
-// tools (a plain chat turn has nothing to continue toward).
 func newCodexContinuationController(ctx context.Context, headers http.Header, cfg *config.Config, model string, responseFormat sdktranslator.Format, translatedBody []byte) (controller *codexContinuationController, ok bool) {
 	if cfg == nil || !cfg.Codex.SemanticContinuation.Enabled {
 		return nil, false
@@ -168,27 +249,26 @@ func newCodexContinuationController(ctx context.Context, headers http.Header, cf
 	if !tools.IsArray() || len(tools.Array()) == 0 {
 		return nil, false
 	}
+	toolNames := make([]string, 0, len(tools.Array()))
+	for _, tool := range tools.Array() {
+		name := tool.Get("function.name").String()
+		if name == "" {
+			name = tool.Get("name").String()
+		}
+		if name != "" {
+			toolNames = append(toolNames, name)
+		}
+	}
 	maxContinuations := cfg.Codex.SemanticContinuation.MaxContinuations
 	if maxContinuations <= 0 {
 		maxContinuations = 1
 	}
-	return &codexContinuationController{
-		remaining:    maxContinuations,
-		toolsOffered: true,
-	}, true
+	return &codexContinuationController{remaining: maxContinuations, toolsOffered: true, toolNames: toolNames}, true
 }
 
-// observe folds one raw upstream SSE line into the current pass.
-func (c *codexContinuationController) observe(line []byte) {
-	c.pass.observe(line)
-}
+func (c *codexContinuationController) observe(line []byte) { c.pass.observe(line) }
 
-// isUpstreamDoneLine reports whether the raw line is the upstream terminal
-// [DONE] marker. The executor must consult shouldContinue before forwarding
-// this line to the translator, because translating it emits the downstream
-// terminal Responses event exactly once. (helps.JSONPayload cannot be used
-// here: it intentionally returns nil for the non-JSON [DONE] sentinel.)
-func (c *codexContinuationController) isUpstreamDoneLine(line []byte) bool {
+func isCodexUpstreamDoneLine(line []byte) bool {
 	trimmed := bytes.TrimSpace(line)
 	if bytes.HasPrefix(trimmed, []byte("data:")) {
 		trimmed = bytes.TrimSpace(trimmed[len("data:"):])
@@ -196,31 +276,94 @@ func (c *codexContinuationController) isUpstreamDoneLine(line []byte) bool {
 	return bytes.Equal(trimmed, []byte("[DONE]"))
 }
 
-// shouldContinue reports whether the just-finished pass stalled and a
-// continuation round trip remains.
-func (c *codexContinuationController) shouldContinue() bool {
-	if c.remaining <= 0 {
-		return false
-	}
-	_, ok := c.pass.instruction(c.toolsOffered)
-	return ok
+func (c *codexContinuationController) isUpstreamDoneLine(line []byte) bool {
+	return isCodexUpstreamDoneLine(line)
 }
 
-// continuationBody builds the next upstream request: the original translated
-// Chat Completions body plus the assistant's stalled prose (when any) and an
-// instructed user message. The second return value is false when no
-// continuation should be attempted.
+// decide is called at every pass boundary, including clean EOF and read error.
+// A synthetic downstream terminal event is allowed only after this method has
+// classified the pass as complete.
+func (c *codexContinuationController) decide(boundary codexContinuationBoundary, readErr error) codexContinuationDecision {
+	if boundary == codexContinuationBoundaryReadError || readErr != nil {
+		if readErr == nil {
+			readErr = errors.New("upstream stream read failed")
+		}
+		return codexContinuationDecision{
+			outcome:        codexContinuationOutcomeFail,
+			classification: "scanner_error",
+			err: &codexTerminalIntegrityError{
+				classification: "scanner_error",
+				cause:          fmt.Errorf("upstream stream ended with a read error before a proven terminal boundary: %w", readErr),
+			},
+		}
+	}
+
+	if instruction, classification, stalled := c.pass.stall(c.toolsOffered, c.toolNames); stalled {
+		if c.remaining > 0 {
+			return codexContinuationDecision{
+				outcome:        codexContinuationOutcomeContinue,
+				classification: classification,
+				instruction:    instruction,
+			}
+		}
+		return codexContinuationDecision{
+			outcome:        codexContinuationOutcomeFail,
+			classification: "continuation_exhausted",
+			err: newCodexTerminalIntegrityError(
+				"continuation_exhausted",
+				fmt.Sprintf("stalled turn remained unresolved after %d continuation pass(es)", c.passIndex),
+			),
+		}
+	}
+
+	if boundary == codexContinuationBoundaryExplicitDone {
+		return codexContinuationDecision{outcome: codexContinuationOutcomeComplete, classification: "explicit_done"}
+	}
+	if c.pass.finishReason != "" {
+		return codexContinuationDecision{outcome: codexContinuationOutcomeComplete, classification: "finish_reason_eof"}
+	}
+	if c.pass.sawToolCall {
+		return codexContinuationDecision{
+			outcome:        codexContinuationOutcomeFail,
+			classification: "eof_pending_tool",
+			err: newCodexTerminalIntegrityError(
+				"eof_pending_tool",
+				"upstream ended after tool-call output without [DONE] or finish_reason; refusing to fabricate tool completion",
+			),
+		}
+	}
+	return codexContinuationDecision{
+		outcome:        codexContinuationOutcomeFail,
+		classification: "eof_without_terminal",
+		err: newCodexTerminalIntegrityError(
+			"eof_without_terminal",
+			"upstream ended without [DONE] or finish_reason; refusing to synthesize response.completed",
+		),
+	}
+}
+
+// shouldContinue remains for focused unit tests and callers outside the two
+// hardened stream loops; new code should use decide at the actual boundary.
+func (c *codexContinuationController) shouldContinue() bool {
+	decision := c.decide(codexContinuationBoundaryExplicitDone, nil)
+	return decision.outcome == codexContinuationOutcomeContinue
+}
+
 func (c *codexContinuationController) continuationBody(originalBody []byte) ([]byte, bool) {
-	instruction, ok := c.pass.instruction(c.toolsOffered)
+	instruction, _, ok := c.pass.stall(c.toolsOffered, c.toolNames)
 	if !ok || c.remaining <= 0 {
 		return nil, false
 	}
 	c.remaining--
 	text := strings.TrimSpace(c.pass.text.String())
+	reasoning := strings.TrimSpace(c.pass.reasoning.String())
 	out := originalBody
-	if text != "" {
+	if text != "" || reasoning != "" {
 		assistant := []byte(`{"role":"assistant","content":""}`)
 		assistant, _ = sjson.SetBytes(assistant, "content", text)
+		if reasoning != "" {
+			assistant, _ = sjson.SetBytes(assistant, "reasoning_content", reasoning)
+		}
 		out, _ = sjson.SetRawBytes(out, "messages.-1", assistant)
 	}
 	user := []byte(`{"role":"user","content":""}`)
@@ -231,10 +374,6 @@ func (c *codexContinuationController) continuationBody(originalBody []byte) ([]b
 	return out, true
 }
 
-// offsetLine rewrites the choice indices of one upstream chunk for the current
-// pass. The Responses translator keys message and tool-call items by upstream
-// choice index; without an offset, a continuation pass's choice 0 would reuse
-// the first pass's already-completed output item. Pass 0 needs no rewrite.
 func (c *codexContinuationController) offsetLine(line []byte) []byte {
 	if c.passIndex == 0 {
 		return line
