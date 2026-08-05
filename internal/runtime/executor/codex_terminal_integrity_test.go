@@ -26,6 +26,15 @@ func TestCodexTerminalArbiterCleanEOFNarratedCallContinues(t *testing.T) {
 	}
 }
 
+func TestCodexTerminalArbiterLaunchingSubagentContinues(t *testing.T) {
+	controller := &codexContinuationController{remaining: 1, toolsOffered: true}
+	controller.observe([]byte(`data: {"choices":[{"delta":{"content":"Launching ERM-230 (solo wave since it shares the control-plane files):"},"finish_reason":"stop"}]}`))
+	decision := controller.decide(codexContinuationBoundaryExplicitDone, nil)
+	if decision.outcome != codexContinuationOutcomeContinue || decision.classification != "narrated_no_tool" {
+		t.Fatalf("decision = %#v", decision)
+	}
+}
+
 func TestCodexTerminalArbiterFinishReasonEOFCompletes(t *testing.T) {
 	controller := &codexContinuationController{remaining: 1, toolsOffered: true}
 	controller.observe([]byte(`data: {"choices":[{"delta":{"content":"Done."},"finish_reason":"stop"}]}`))
