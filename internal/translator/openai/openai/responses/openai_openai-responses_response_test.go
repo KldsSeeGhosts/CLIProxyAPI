@@ -715,8 +715,8 @@ func TestConvertOpenAIChatCompletionsResponseToOpenAIResponses_CustomToolNameArr
 	if got := inputDone.Get("item_id").String(); got != "ctc_call_exec" {
 		t.Fatalf("custom input done item_id = %q, want ctc_call_exec", got)
 	}
-	if got := inputDone.Get("input").String(); got != "pwd" {
-		t.Fatalf("custom input done input = %q, want pwd", got)
+	if got := inputDone.Get("input").String(); got != `const r = await tools.exec_command({cmd:"pwd"}); text(r.output);` {
+		t.Fatalf("custom input done input = %q, want code-mode exec", got)
 	}
 }
 
@@ -979,14 +979,15 @@ func TestConvertOpenAIChatCompletionsResponseToOpenAIResponses_RestoresAdditiona
 			t.Fatalf("%s name = %q, want terminal__exec", tc.label, got)
 		}
 	}
-	if got := inputDone.Get("input").String(); got != "pwd" {
-		t.Fatalf("custom input = %q, want pwd", got)
+	wantInput := `const r = await tools.exec_command({cmd:"pwd"}); text(r.output);`
+	if got := inputDone.Get("input").String(); got != wantInput {
+		t.Fatalf("custom input = %q, want code-mode exec", got)
 	}
-	if got := done.Get("item.input").String(); got != "pwd" {
-		t.Fatalf("done input = %q, want pwd", got)
+	if got := done.Get("item.input").String(); got != wantInput {
+		t.Fatalf("done input = %q, want code-mode exec", got)
 	}
-	if got := completed.Get("response.output.0.input").String(); got != "pwd" {
-		t.Fatalf("completed input = %q, want pwd", got)
+	if got := completed.Get("response.output.0.input").String(); got != wantInput {
+		t.Fatalf("completed input = %q, want code-mode exec", got)
 	}
 }
 
@@ -1012,7 +1013,280 @@ func TestConvertOpenAIChatCompletionsResponseToOpenAIResponsesNonStream_Restores
 	if got := data.Get("output.0.name").String(); got != "terminal__exec" {
 		t.Fatalf("output name = %q, want terminal__exec; response=%s", got, resp)
 	}
-	if got := data.Get("output.0.input").String(); got != "pwd" {
-		t.Fatalf("output input = %q, want pwd; response=%s", got, resp)
+	wantInput := `const r = await tools.exec_command({cmd:"pwd"}); text(r.output);`
+	if got := data.Get("output.0.input").String(); got != wantInput {
+		t.Fatalf("output input = %q, want code-mode exec; response=%s", got, resp)
+	}
+}
+
+func TestConvertOpenAIChatCompletionsResponseToOpenAIResponses_LengthFinishReasonYieldsIncomplete(t *testing.T) {
+	// A hard max_output_tokens truncation upstream must surface to Codex as
+	// response.incomplete with reason=max_output_tokens, not a false success, while
+	// the partial text and item-level done events are preserved.
+	chunks := []string{
+		`data: {"id":"resp_truncated","object":"chat.completion.chunk","created":1773896263,"model":"model","choices":[{"index":0,"delta":{"role":"assistant","content":"1\n2\n3\n"}}]}`,
+		`data: {"id":"resp_truncated","object":"chat.completion.chunk","created":1773896263,"model":"model","choices":[{"index":0,"delta":{"role":null,"content":"4\n5"},"finish_reason":"length"}],"usage":{"prompt_tokens":10,"completion_tokens":64,"total_tokens":74}}`,
+		`data: [DONE]`,
+	}
+	request := []byte(`{"model":"gpt-5.4","max_output_tokens":64}`)
+
+	var param any
+	var out [][]byte
+	for _, line := range chunks {
+		out = append(out, ConvertOpenAIChatCompletionsResponseToOpenAIResponses(context.Background(), "model", request, request, []byte(line), &param)...)
+	}
+
+	var terminal gjson.Result
+	terminalCount := 0
+	textDoneCount := 0
+	seqs := []int64{}
+	for _, chunk := range out {
+		ev, data := parseOpenAIResponsesSSEEvent(t, chunk)
+		seqs = append(seqs, data.Get("sequence_number").Int())
+		switch ev {
+		case "response.completed", "response.incomplete":
+			terminalCount++
+			terminal = data
+		case "response.output_text.done":
+			textDoneCount++
+		}
+	}
+
+	if terminalCount != 1 {
+		t.Fatalf("expected exactly 1 terminal event, got %d", terminalCount)
+	}
+	if got := terminal.Get("response.status").String(); got != "incomplete" {
+		t.Fatalf("terminal response.status = %q, want incomplete", got)
+	}
+	if got := terminal.Get("response.incomplete_details.reason").String(); got != "max_output_tokens" {
+		t.Fatalf("incomplete_details.reason = %q, want max_output_tokens", got)
+	}
+	if got := terminal.Get("response.max_output_tokens").Int(); got != 64 {
+		t.Fatalf("terminal response.max_output_tokens = %d, want 64", got)
+	}
+	// The partial content must still be preserved in the terminal output.
+	if got := terminal.Get("response.output.0.content.0.text").String(); got != "1\n2\n3\n4\n5" {
+		t.Fatalf("partial output text = %q, want %q", got, "1\n2\n3\n4\n5")
+	}
+	if got := terminal.Get("response.usage.output_tokens").Int(); got != 64 {
+		t.Fatalf("output_tokens = %d, want 64", got)
+	}
+	// Item-level finalization must still run so the partial text is closed before
+	// the terminal event.
+	if textDoneCount != 1 {
+		t.Fatalf("expected 1 output_text.done, got %d", textDoneCount)
+	}
+	for i := 1; i < len(seqs); i++ {
+		if seqs[i] <= seqs[i-1] {
+			t.Fatalf("sequence numbers not strictly ascending: %v", seqs)
+		}
+	}
+}
+
+func TestConvertOpenAIChatCompletionsResponseToOpenAIResponses_ContentFilterFinishReasonYieldsIncomplete(t *testing.T) {
+	// A filtered turn is not a clean success: surface response.incomplete with the
+	// schema-defined content_filter reason (mirrors the sibling translators).
+	chunks := []string{
+		`data: {"id":"resp_filtered","object":"chat.completion.chunk","created":1773896263,"model":"model","choices":[{"index":0,"delta":{"role":"assistant","content":"I cannot"}}]}`,
+		`data: {"id":"resp_filtered","object":"chat.completion.chunk","created":1773896263,"model":"model","choices":[{"index":0,"delta":{"role":null,"content":null},"finish_reason":"content_filter"}],"usage":{"prompt_tokens":8,"completion_tokens":3,"total_tokens":11}}`,
+		`data: [DONE]`,
+	}
+	request := []byte(`{"model":"gpt-5.4"}`)
+
+	var param any
+	var out [][]byte
+	for _, line := range chunks {
+		out = append(out, ConvertOpenAIChatCompletionsResponseToOpenAIResponses(context.Background(), "model", request, request, []byte(line), &param)...)
+	}
+
+	var terminal gjson.Result
+	terminalCount := 0
+	for _, chunk := range out {
+		ev, data := parseOpenAIResponsesSSEEvent(t, chunk)
+		if ev == "response.completed" || ev == "response.incomplete" {
+			terminalCount++
+			terminal = data
+		}
+	}
+	if terminalCount != 1 {
+		t.Fatalf("expected exactly 1 terminal event, got %d", terminalCount)
+	}
+	if got := terminal.Get("response.status").String(); got != "incomplete" {
+		t.Fatalf("terminal response.status = %q, want incomplete", got)
+	}
+	if got := terminal.Get("response.incomplete_details.reason").String(); got != "content_filter" {
+		t.Fatalf("incomplete_details.reason = %q, want content_filter", got)
+	}
+}
+
+func TestConvertOpenAIChatCompletionsResponseToOpenAIResponses_StopFinishReasonYieldsCompleted(t *testing.T) {
+	chunks := []string{
+		`data: {"id":"resp_stop","object":"chat.completion.chunk","created":1773896263,"model":"model","choices":[{"index":0,"delta":{"role":"assistant","content":"hello"}}]}`,
+		`data: {"id":"resp_stop","object":"chat.completion.chunk","created":1773896263,"model":"model","choices":[{"index":0,"delta":{"role":null,"content":" world"},"finish_reason":"stop"}],"usage":{"prompt_tokens":2,"completion_tokens":2,"total_tokens":4}}`,
+		`data: [DONE]`,
+	}
+	request := []byte(`{"model":"gpt-5.4"}`)
+
+	var param any
+	var out [][]byte
+	for _, line := range chunks {
+		out = append(out, ConvertOpenAIChatCompletionsResponseToOpenAIResponses(context.Background(), "model", request, request, []byte(line), &param)...)
+	}
+
+	var terminal gjson.Result
+	terminalCount := 0
+	for _, chunk := range out {
+		ev, data := parseOpenAIResponsesSSEEvent(t, chunk)
+		if ev == "response.completed" || ev == "response.incomplete" {
+			terminalCount++
+			terminal = data
+		}
+	}
+	if terminalCount != 1 {
+		t.Fatalf("expected exactly 1 terminal event, got %d", terminalCount)
+	}
+	if got := terminal.Get("response.status").String(); got != "completed" {
+		t.Fatalf("terminal response.status = %q, want completed", got)
+	}
+	if terminal.Get("response.incomplete_details").Exists() {
+		t.Fatalf("completed terminal must not carry incomplete_details: %s", terminal.Get("response.incomplete_details").Raw)
+	}
+	if got := terminal.Get("response.output.0.content.0.text").String(); got != "hello world" {
+		t.Fatalf("output text = %q, want %q", got, "hello world")
+	}
+}
+
+func TestConvertOpenAIChatCompletionsResponseToOpenAIResponses_ToolCallFinishReasonYieldsCompleted(t *testing.T) {
+	chunks := []string{
+		`data: {"id":"resp_tools","object":"chat.completion.chunk","created":1773896263,"model":"model","choices":[{"index":0,"delta":{"role":"assistant","content":null,"tool_calls":[{"index":0,"id":"call_weather","type":"function","function":{"name":"get_weather","arguments":""}}]}}]}`,
+		`data: {"id":"resp_tools","object":"chat.completion.chunk","created":1773896263,"model":"model","choices":[{"index":0,"delta":{"role":null,"content":null,"tool_calls":[{"index":0,"function":{"arguments":"{\"location\":\"Tokyo\"}"}}]},"finish_reason":"tool_calls"}],"usage":{"prompt_tokens":5,"completion_tokens":9,"total_tokens":14}}`,
+		`data: [DONE]`,
+	}
+	request := []byte(`{"model":"gpt-5.4","tool_choice":"auto","parallel_tool_calls":true}`)
+
+	var param any
+	var out [][]byte
+	for _, line := range chunks {
+		out = append(out, ConvertOpenAIChatCompletionsResponseToOpenAIResponses(context.Background(), "model", request, request, []byte(line), &param)...)
+	}
+
+	var terminal gjson.Result
+	terminalCount := 0
+	for _, chunk := range out {
+		ev, data := parseOpenAIResponsesSSEEvent(t, chunk)
+		if ev == "response.completed" || ev == "response.incomplete" {
+			terminalCount++
+			terminal = data
+		}
+	}
+	if terminalCount != 1 {
+		t.Fatalf("expected exactly 1 terminal event, got %d", terminalCount)
+	}
+	if got := terminal.Get("response.status").String(); got != "completed" {
+		t.Fatalf("terminal response.status = %q, want completed", got)
+	}
+	if got := terminal.Get("response.output.0.type").String(); got != "function_call" {
+		t.Fatalf("response.output.0.type = %q, want function_call", got)
+	}
+	if got := terminal.Get("response.output.0.call_id").String(); got != "call_weather" {
+		t.Fatalf("response.output.0.call_id = %q, want call_weather", got)
+	}
+}
+
+func TestConvertOpenAIChatCompletionsResponseToOpenAIResponses_DoneWithoutChunksEmitsWellFormedPrologueAndTerminal(t *testing.T) {
+	// Upstream produced no choices-bearing chunk at all (e.g. an error frame then
+	// EOF). The [DONE] marker must still yield a well-formed stream ending in a
+	// terminal event so clients never see "stream closed before response.completed".
+	var param any
+	out := ConvertOpenAIChatCompletionsResponseToOpenAIResponses(context.Background(), "model", nil, nil, []byte(`data: [DONE]`), &param)
+
+	if len(out) != 3 {
+		t.Fatalf("expected response.created + response.in_progress + terminal, got %d events", len(out))
+	}
+	var seqs []int64
+	var firstID string
+	var firstCreated int64
+	for i, chunk := range out {
+		_, data := parseOpenAIResponsesSSEEvent(t, chunk)
+		seqs = append(seqs, data.Get("sequence_number").Int())
+		if i == 0 {
+			firstID = data.Get("response.id").String()
+			firstCreated = data.Get("response.created_at").Int()
+		} else {
+			if got := data.Get("response.id").String(); got != firstID {
+				t.Fatalf("event[%d] response.id = %q, want %q", i, got, firstID)
+			}
+			if got := data.Get("response.created_at").Int(); got != firstCreated {
+				t.Fatalf("event[%d] response.created_at = %d, want %d", i, got, firstCreated)
+			}
+		}
+	}
+	for i, want := range []string{"response.created", "response.in_progress", "response.completed"} {
+		ev, _ := parseOpenAIResponsesSSEEvent(t, out[i])
+		if ev != want {
+			t.Fatalf("event[%d] = %q, want %q", i, ev, want)
+		}
+	}
+	if !strings.HasPrefix(firstID, "resp_") {
+		t.Fatalf("synthetic response id = %q, want resp_ prefix", firstID)
+	}
+	if firstCreated == 0 {
+		t.Fatal("expected a synthesized response.created_at > 0")
+	}
+	if seqs[0] != 1 || seqs[1] != 2 || seqs[2] != 3 {
+		t.Fatalf("sequence numbers = %v, want [1 2 3]", seqs)
+	}
+}
+
+func TestConvertOpenAIChatCompletionsResponseToOpenAIResponses_DoneTwiceEmitsSingleTerminalEvent(t *testing.T) {
+	var param any
+	first := ConvertOpenAIChatCompletionsResponseToOpenAIResponses(context.Background(), "model", nil, nil, []byte(`data: [DONE]`), &param)
+	second := ConvertOpenAIChatCompletionsResponseToOpenAIResponses(context.Background(), "model", nil, nil, []byte(`data: [DONE]`), &param)
+
+	if len(first) != 3 {
+		t.Fatalf("expected 3 events on first [DONE] (created + in_progress + terminal), got %d", len(first))
+	}
+	if len(second) != 0 {
+		t.Fatalf("expected 0 events on repeated [DONE], got %d", len(second))
+	}
+	terminalCount := 0
+	for _, chunk := range first {
+		ev, _ := parseOpenAIResponsesSSEEvent(t, chunk)
+		if ev == "response.completed" || ev == "response.incomplete" {
+			terminalCount++
+		}
+	}
+	if terminalCount != 1 {
+		t.Fatalf("expected exactly 1 terminal event in stream, got %d", terminalCount)
+	}
+}
+
+func TestConvertOpenAIChatCompletionsResponseToOpenAIResponses_DoneAfterFinishReasonTwiceEmitsSingleTerminalEvent(t *testing.T) {
+	// finish_reason finalized the turn on chunk 1; a [DONE] pair must still yield
+	// exactly one terminal event.
+	chunks := []string{
+		`data: {"id":"resp_done_after_fr","object":"chat.completion.chunk","created":1773896263,"model":"model","choices":[{"index":0,"delta":{"role":"assistant","content":"ping"},"finish_reason":"stop"}]}`,
+		`data: [DONE]`,
+		`data: [DONE]`,
+	}
+	request := []byte(`{"model":"gpt-5.4"}`)
+
+	var param any
+	var out [][]byte
+	for _, line := range chunks {
+		out = append(out, ConvertOpenAIChatCompletionsResponseToOpenAIResponses(context.Background(), "model", request, request, []byte(line), &param)...)
+	}
+	terminalCount := 0
+	for _, chunk := range out {
+		ev, data := parseOpenAIResponsesSSEEvent(t, chunk)
+		if ev == "response.completed" || ev == "response.incomplete" {
+			terminalCount++
+			if got := data.Get("response.output.0.content.0.text").String(); got != "ping" {
+				t.Fatalf("terminal output text = %q, want %q", got, "ping")
+			}
+		}
+	}
+	if terminalCount != 1 {
+		t.Fatalf("expected exactly 1 terminal event, got %d", terminalCount)
 	}
 }

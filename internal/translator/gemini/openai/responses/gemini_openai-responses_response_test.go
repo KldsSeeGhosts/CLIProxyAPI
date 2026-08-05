@@ -1319,3 +1319,122 @@ func TestConvertGeminiResponseToOpenAIResponses_ResponseOutputOrdering(t *testin
 		t.Fatalf("expected response.completed after message added: msgAdded=%d completed=%d", posMsgAdded, posCompleted)
 	}
 }
+
+func TestConvertGeminiResponseToOpenAIResponses_CustomExecStreamingUsesCodeModeInput(t *testing.T) {
+	request := []byte(`{
+		"model":"claude-fable-5-dd-deepseek-v4-flash",
+		"tools":[{"type":"custom","name":"exec"}]
+	}`)
+	raw := []byte(`data: {"candidates":[{"content":{"role":"model","parts":[{"functionCall":{"name":"exec","args":{"command":"pwd","timeout_ms":"10000"}}}]},"finishReason":"STOP"}],"responseId":"custom-exec-stream"}`)
+	var param any
+	chunks := ConvertGeminiResponseToOpenAIResponses(context.Background(), "gemini-3.6-flash-high", request, request, raw, &param)
+	if len(chunks) == 0 {
+		t.Fatal("converter returned no SSE events")
+	}
+	var gotCustomDone, gotInputDone bool
+	for _, chunk := range chunks {
+		event, data := parseSSEEvent(t, chunk)
+		switch event {
+		case "response.function_call_arguments.delta", "response.function_call_arguments.done":
+			t.Fatalf("custom exec emitted ordinary function-call event %q: %s", event, data)
+		case "response.custom_tool_call_input.done":
+			gotInputDone = true
+			input := data.Get("input").String()
+			if !strings.Contains(input, "tools.exec_command") || !strings.Contains(input, `yield_time_ms:10000`) {
+				t.Fatalf("custom exec input was not normalized to code mode: %q", input)
+			}
+		case "response.output_item.done":
+			if data.Get("item.type").String() == "custom_tool_call" {
+				gotCustomDone = true
+				if !strings.Contains(data.Get("item.input").String(), "tools.exec_command") {
+					t.Fatalf("custom output item input was not code mode: %s", data)
+				}
+			}
+		}
+	}
+	if !gotInputDone || !gotCustomDone {
+		t.Fatalf("missing custom tool completion events: inputDone=%v customDone=%v", gotInputDone, gotCustomDone)
+	}
+}
+
+func TestConvertGeminiResponseToOpenAIResponses_CustomExecPlainStringUsesCodeModeInput(t *testing.T) {
+	request := []byte(`{
+		"model":"claude-fable-5-dd-deepseek-v4-flash",
+		"tools":[{"type":"custom","name":"exec"}]
+	}`)
+	raw := []byte(`data: {"candidates":[{"content":{"role":"model","parts":[{"functionCall":{"name":"exec","args":{"input":"pwd"}}}]},"finishReason":"STOP"}],"responseId":"custom-exec-plain"}`)
+	var param any
+	chunks := ConvertGeminiResponseToOpenAIResponses(context.Background(), "gemini-3.6-flash-high", request, request, raw, &param)
+	for _, chunk := range chunks {
+		event, data := parseSSEEvent(t, chunk)
+		if event == "response.custom_tool_call_input.done" {
+			if got := data.Get("input").String(); got != `const r = await tools.exec_command({cmd:"pwd"}); text(r.output);` {
+				t.Fatalf("plain custom exec input = %q", got)
+			}
+			return
+		}
+	}
+	t.Fatal("missing response.custom_tool_call_input.done")
+}
+
+func TestConvertGeminiResponseToOpenAIResponsesNonStream_CustomExecUsesCodeModeInput(t *testing.T) {
+	request := []byte(`{
+		"model":"claude-fable-5-dd-deepseek-v4-flash",
+		"tools":[{"type":"custom","name":"exec"}]
+	}`)
+	raw := []byte(`{"candidates":[{"content":{"role":"model","parts":[{"functionCall":{"name":"exec","args":{"command":"pwd","timeout_ms":"10000"}}}]},"finishReason":"STOP"}],"responseId":"custom-exec-nonstream"}`)
+	out := ConvertGeminiResponseToOpenAIResponsesNonStream(context.Background(), "gemini-3.6-flash-high", request, request, raw, nil)
+	if got := gjson.GetBytes(out, "output.0.type").String(); got != "custom_tool_call" {
+		t.Fatalf("output type = %q, want custom_tool_call; response=%s", got, out)
+	}
+	input := gjson.GetBytes(out, "output.0.input").String()
+	if !strings.Contains(input, "tools.exec_command") || !strings.Contains(input, `yield_time_ms:10000`) {
+		t.Fatalf("non-stream custom exec input was not normalized to code mode: %q; response=%s", input, out)
+	}
+}
+
+func TestConvertGeminiResponseToOpenAIResponses_RestoresNamespaceFunctionCall(t *testing.T) {
+	originalRequest := []byte(`{"request":{"model":"claude-opus-4-6-thinking","tools":[{"type":"namespace","name":"agents","tools":[{"type":"function","name":"spawn_agent","parameters":{"type":"object"}}]}]}}`)
+	raw := []byte(`data: {"candidates":[{"content":{"role":"model","parts":[{"functionCall":{"name":"agents__spawn_agent","args":{"task_name":"worker"}}}]},"finishReason":"STOP"}],"responseId":"namespace-stream"}`)
+	var param any
+	chunks := ConvertGeminiResponseToOpenAIResponses(context.Background(), "claude-opus-4-6-thinking", originalRequest, nil, raw, &param)
+	var added, done, completed gjson.Result
+	for _, chunk := range chunks {
+		event, data := parseSSEEvent(t, chunk)
+		switch event {
+		case "response.output_item.added":
+			if data.Get("item.type").String() == "function_call" {
+				added = data
+			}
+		case "response.output_item.done":
+			if data.Get("item.type").String() == "function_call" {
+				done = data
+			}
+		case "response.completed":
+			completed = data
+		}
+	}
+	for label, item := range map[string]gjson.Result{"added": added.Get("item"), "done": done.Get("item"), "completed": completed.Get("response.output.0")} {
+		if !item.Exists() {
+			t.Fatalf("missing %s function call item", label)
+		}
+		if got := item.Get("name").String(); got != "spawn_agent" {
+			t.Fatalf("%s name = %q, want spawn_agent; item=%s", label, got, item.Raw)
+		}
+		if got := item.Get("namespace").String(); got != "agents" {
+			t.Fatalf("%s namespace = %q, want agents; item=%s", label, got, item.Raw)
+		}
+	}
+}
+
+func TestConvertGeminiResponseToOpenAIResponsesNonStream_RestoresAdditionalToolsNamespaceFunctionCall(t *testing.T) {
+	originalRequest := []byte(`{"request":{"model":"claude-opus-4-6-thinking","input":[{"type":"additional_tools","tools":[{"type":"namespace","name":"mcp__linear","tools":[{"type":"function","name":"get_issue","parameters":{"type":"object"}}]}]}]}}`)
+	raw := []byte(`{"candidates":[{"content":{"role":"model","parts":[{"functionCall":{"name":"mcp__linear__get_issue","args":{"issue":"ERM-258"}}}]},"finishReason":"STOP"}],"responseId":"namespace-nonstream"}`)
+	out := ConvertGeminiResponseToOpenAIResponsesNonStream(context.Background(), "claude-opus-4-6-thinking", originalRequest, nil, raw, nil)
+	if got := gjson.GetBytes(out, "output.0.name").String(); got != "get_issue" {
+		t.Fatalf("name = %q, want get_issue; response=%s", got, out)
+	}
+	if got := gjson.GetBytes(out, "output.0.namespace").String(); got != "mcp__linear" {
+		t.Fatalf("namespace = %q, want mcp__linear; response=%s", got, out)
+	}
+}
