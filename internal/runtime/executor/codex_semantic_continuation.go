@@ -23,7 +23,7 @@ const codexContinuationAnnouncedCallInstruction = "You announced a tool call in 
 var codexContinuationAnnouncementVerbs = []string{
 	"spawn", "wait_agent", "list_agents", "send_input", "close_agent",
 	"exec_command", "write_stdin", "update_plan", "apply_patch",
-	"tool call", "tool_call",
+	"launch", "tool call", "tool_call",
 }
 
 var codexContinuationAnnouncementSuffixes = []string{":", "：", "—", "–", "-", "…", "..."}
