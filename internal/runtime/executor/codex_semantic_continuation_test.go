@@ -51,10 +51,15 @@ func TestCodexContinuationControllerGate(t *testing.T) {
 		{"no tools offered", codexContinuationTestConfig(true, []string{"kimi-*"}, 1), codexUA, sdktranslator.FormatOpenAIResponse, `{"model":"k3-256k","messages":[]}`, false},
 		{"codex exec client", codexContinuationTestConfig(true, []string{"kimi-*"}, 1), codexContinuationTestHeaders("codex_exec/0.146.0"), sdktranslator.FormatOpenAIResponse, codexContinuationTestBody, true},
 		{"codex tui client", codexContinuationTestConfig(true, []string{"kimi-*"}, 1), codexContinuationTestHeaders("codex-tui/0.146.0"), sdktranslator.FormatOpenAIResponse, codexContinuationTestBody, true},
+		{"openai compat requested alias", codexContinuationTestConfig(true, []string{"dashscope/*"}, 1), codexUA, sdktranslator.FormatOpenAIResponse, codexContinuationTestBody, true},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			_, ok := newCodexContinuationController(context.Background(), tt.headers, tt.cfg, "kimi-k3-256k", tt.responseFormat, []byte(tt.body))
+			model := "kimi-k3-256k"
+			if tt.name == "openai compat requested alias" {
+				model = "dashscope/qwen3.8-max-preview"
+			}
+			_, ok := newCodexContinuationController(context.Background(), tt.headers, tt.cfg, model, tt.responseFormat, []byte(tt.body))
 			if ok != tt.wantOK {
 				t.Fatalf("ok = %v, want %v", ok, tt.wantOK)
 			}

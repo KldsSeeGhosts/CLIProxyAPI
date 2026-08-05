@@ -429,7 +429,12 @@ func (e *OpenAICompatExecutor) ExecuteStream(ctx context.Context, auth *cliproxy
 		// response.incomplete) was already delivered to the output channel.
 		terminalResponsesEmitted := false
 		defer streamUsage.Publish(ctx, reporter)
-		cont, contOK := newCodexContinuationController(ctx, opts.Headers, e.cfg, req.Model, responseFormat, translated)
+		// OpenAI-compatible routing can normalize an alias such as
+		// "dashscope/qwen3.8-max-preview" to the upstream model name
+		// "qwen3.8-max-preview" before it reaches this executor.  Semantic
+		// continuation patterns are configured against the client-requested
+		// routed ID, so use the preserved requested model for this gate.
+		cont, contOK := newCodexContinuationController(ctx, opts.Headers, e.cfg, requestedModel, responseFormat, translated)
 		currentBody := translated
 		passResp := httpResp
 		finishPass := func() {
