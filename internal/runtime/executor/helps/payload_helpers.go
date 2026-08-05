@@ -913,6 +913,12 @@ func PayloadRequestPath(opts cliproxyexecutor.Options) string {
 	}
 }
 
+// MatchModelPattern exposes matchModelPattern for executor feature gates that
+// opt routes in or out via '*' wildcard model patterns.
+func MatchModelPattern(pattern, model string) bool {
+	return matchModelPattern(pattern, model)
+}
+
 // matchModelPattern performs simple wildcard matching where '*' matches zero or more characters.
 // Examples:
 //

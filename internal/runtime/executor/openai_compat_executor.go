@@ -5,6 +5,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"mime"
@@ -138,6 +139,12 @@ func (e *OpenAICompatExecutor) Execute(ctx context.Context, auth *cliproxyauth.A
 		if updated, errDelete := sjson.DeleteBytes(translated, "stream"); errDelete == nil {
 			translated = updated
 		}
+	}
+	// Whichever path built it, a Responses-source request stays Responses-shaped
+	// here and may carry replayed reasoning items whose empty encrypted_content
+	// is invalid upstream. The compact caller cannot be relied on to gate this:
+	// every Responses request (compact or ordinary) must be sanitized exactly once.
+	if sourceFormatEqual(from, sdktranslator.FormatOpenAIResponse) {
 		translated = sanitizeOpenAIResponsesReasoningEncryptedContent(ctx, "openai compat executor", translated)
 	}
 	reporter.SetTranslatedReasoningEffort(translated, to.String())
@@ -192,7 +199,7 @@ func (e *OpenAICompatExecutor) Execute(ctx context.Context, auth *cliproxyauth.A
 		b, _ := io.ReadAll(httpResp.Body)
 		helps.AppendAPIResponseChunk(ctx, e.cfg, b)
 		helps.LogWithRequestID(ctx).Debugf("request error, error status: %d, error message: %s", httpResp.StatusCode, helps.SummarizeErrorBody(httpResp.Header.Get("Content-Type"), b))
-		err = statusErr{code: httpResp.StatusCode, msg: string(b)}
+		err = newOpenAICompatStatusErr(httpResp, b)
 		return resp, err
 	}
 	body, err := io.ReadAll(httpResp.Body)
@@ -290,7 +297,7 @@ func (e *OpenAICompatExecutor) executeImages(ctx context.Context, auth *cliproxy
 
 	if httpResp.StatusCode < 200 || httpResp.StatusCode >= 300 {
 		helps.LogWithRequestID(ctx).Debugf("request error, error status: %d, error message: %s", httpResp.StatusCode, helps.SummarizeErrorBody(httpResp.Header.Get("Content-Type"), body))
-		err = statusErr{code: httpResp.StatusCode, msg: string(body)}
+		err = newOpenAICompatStatusErr(httpResp, body)
 		return resp, err
 	}
 
@@ -348,46 +355,54 @@ func (e *OpenAICompatExecutor) ExecuteStream(ctx context.Context, auth *cliproxy
 	// Request usage data in the final streaming chunk so that token statistics
 	// are captured even when the upstream is an OpenAI-compatible provider.
 	translated = helps.SetBoolIfDifferent(translated, "stream_options.include_usage", true)
+	// Replayed reasoning items from a Responses client can carry an empty
+	// encrypted_content that is invalid for non-OpenAI providers; sanitize every
+	// Responses-source request once, exactly like the native codex executor.
+	if sourceFormatEqual(from, sdktranslator.FormatOpenAIResponse) {
+		translated = sanitizeOpenAIResponsesReasoningEncryptedContent(ctx, "openai compat executor", translated)
+	}
 	reporter.SetTranslatedReasoningEffort(translated, to.String())
 
 	url := strings.TrimSuffix(baseURL, "/") + "/chat/completions"
-	httpReq, err := http.NewRequestWithContext(ctx, http.MethodPost, url, bytes.NewReader(translated))
-	if err != nil {
-		return nil, err
-	}
-	httpReq.Header.Set("Content-Type", "application/json")
-	if apiKey != "" {
-		httpReq.Header.Set("Authorization", "Bearer "+apiKey)
-	}
-	httpReq.Header.Set("User-Agent", "cli-proxy-openai-compat")
 	var attrs map[string]string
 	if auth != nil {
 		attrs = auth.Attributes
 	}
-	util.ApplyCustomHeadersFromAttrs(httpReq, attrs)
-	httpReq.Header.Set("Accept", "text/event-stream")
-	httpReq.Header.Set("Cache-Control", "no-cache")
 	var authID, authLabel, authType, authValue string
 	if auth != nil {
 		authID = auth.ID
 		authLabel = auth.Label
 		authType, authValue = auth.AccountInfo()
 	}
-	helps.RecordAPIRequest(ctx, e.cfg, helps.UpstreamRequestLog{
-		URL:       url,
-		Method:    http.MethodPost,
-		Headers:   httpReq.Header.Clone(),
-		Body:      translated,
-		Provider:  e.Identifier(),
-		AuthID:    authID,
-		AuthLabel: authLabel,
-		AuthType:  authType,
-		AuthValue: authValue,
-	})
-
 	httpClient := helps.NewProxyAwareHTTPClient(ctx, e.cfg, auth, 0)
 	httpClient = reporter.TrackHTTPClient(httpClient)
-	httpResp, err := httpClient.Do(httpReq)
+	startStream := func(reqBody []byte) (*http.Response, error) {
+		streamReq, errReq := http.NewRequestWithContext(ctx, http.MethodPost, url, bytes.NewReader(reqBody))
+		if errReq != nil {
+			return nil, errReq
+		}
+		streamReq.Header.Set("Content-Type", "application/json")
+		if apiKey != "" {
+			streamReq.Header.Set("Authorization", "Bearer "+apiKey)
+		}
+		streamReq.Header.Set("User-Agent", "cli-proxy-openai-compat")
+		util.ApplyCustomHeadersFromAttrs(streamReq, attrs)
+		streamReq.Header.Set("Accept", "text/event-stream")
+		streamReq.Header.Set("Cache-Control", "no-cache")
+		helps.RecordAPIRequest(ctx, e.cfg, helps.UpstreamRequestLog{
+			URL:       url,
+			Method:    http.MethodPost,
+			Headers:   streamReq.Header.Clone(),
+			Body:      reqBody,
+			Provider:  e.Identifier(),
+			AuthID:    authID,
+			AuthLabel: authLabel,
+			AuthType:  authType,
+			AuthValue: authValue,
+		})
+		return httpClient.Do(streamReq)
+	}
+	httpResp, err := startStream(translated)
 	if err != nil {
 		helps.RecordAPIResponseError(ctx, e.cfg, err)
 		return nil, err
@@ -400,83 +415,193 @@ func (e *OpenAICompatExecutor) ExecuteStream(ctx context.Context, auth *cliproxy
 		if errClose := httpResp.Body.Close(); errClose != nil {
 			log.Errorf("openai compat executor: close response body error: %v", errClose)
 		}
-		err = statusErr{code: httpResp.StatusCode, msg: string(b)}
+		err = newOpenAICompatStatusErr(httpResp, b)
 		return nil, err
 	}
 	out := make(chan cliproxyexecutor.StreamChunk)
 	go func() {
 		defer close(out)
-		defer func() {
-			if errClose := httpResp.Body.Close(); errClose != nil {
-				log.Errorf("openai compat executor: close response body error: %v", errClose)
-			}
-		}()
-		scanner := bufio.NewScanner(httpResp.Body)
-		scanner.Buffer(nil, 52_428_800) // 50MB
 		claudeInputTokens := helps.NewClaudeInputTokenState(from, to, responseFormat, originalPayload)
 		var param any
 		var streamUsage helps.StreamUsageBuffer
+		// terminalResponsesEmitted records whether a translated downstream chunk
+		// carrying a terminal Responses event (response.completed or
+		// response.incomplete) was already delivered to the output channel. A
+		// codex client consumes that event and closes downstream immediately;
+		// the OpenAI-compatible upstream socket is still closing, so the scan
+		// ends with context.Canceled even though the turn succeeded.
+		terminalResponsesEmitted := false
 		defer streamUsage.Publish(ctx, reporter)
-		for scanner.Scan() {
-			line := scanner.Bytes()
-			helps.AppendAPIResponseChunk(ctx, e.cfg, line)
-			streamUsage.ObserveOpenAIStream(line)
-			trimmedLine := bytes.TrimSpace(line)
-			if len(trimmedLine) == 0 {
-				continue
+		cont, contOK := newCodexContinuationController(ctx, opts.Headers, e.cfg, req.Model, responseFormat, translated)
+		currentBody := translated
+		passResp := httpResp
+		finishPass := func() {
+			streamUsage.Publish(ctx, reporter)
+			reporter.EnsurePublished(ctx)
+		}
+		flushDone := func() bool {
+			chunks := helps.TranslateStreamWithClaudeInputTokens(ctx, to, responseFormat, req.Model, opts.OriginalRequest, currentBody, []byte("data: [DONE]"), &param, claudeInputTokens)
+			for i := range chunks {
+				select {
+				case out <- cliproxyexecutor.StreamChunk{Payload: chunks[i]}:
+					if openAICompatResponsesTerminalChunk(chunks[i]) {
+						terminalResponsesEmitted = true
+					}
+				case <-ctx.Done():
+					return false
+				}
 			}
-
-			if !bytes.HasPrefix(trimmedLine, []byte("data:")) {
-				if bytes.HasPrefix(trimmedLine, []byte(":")) || bytes.HasPrefix(trimmedLine, []byte("event:")) ||
-					bytes.HasPrefix(trimmedLine, []byte("id:")) || bytes.HasPrefix(trimmedLine, []byte("retry:")) {
+			return true
+		}
+		for {
+			scanner := bufio.NewScanner(passResp.Body)
+			scanner.Buffer(nil, 52_428_800) // 50MB
+			continueUpstream := false
+			aborted := false
+			failed := false
+			for scanner.Scan() {
+				line := scanner.Bytes()
+				helps.AppendAPIResponseChunk(ctx, e.cfg, line)
+				streamUsage.ObserveOpenAIStream(line)
+				trimmedLine := bytes.TrimSpace(line)
+				if len(trimmedLine) == 0 {
 					continue
 				}
-				if bytes.HasPrefix(trimmedLine, []byte("{")) || bytes.HasPrefix(trimmedLine, []byte("[")) {
-					streamErr := statusErr{code: http.StatusBadGateway, msg: string(trimmedLine)}
+
+				if !bytes.HasPrefix(trimmedLine, []byte("data:")) {
+					if bytes.HasPrefix(trimmedLine, []byte(":")) || bytes.HasPrefix(trimmedLine, []byte("event:")) ||
+						bytes.HasPrefix(trimmedLine, []byte("id:")) || bytes.HasPrefix(trimmedLine, []byte("retry:")) {
+						continue
+					}
+					if bytes.HasPrefix(trimmedLine, []byte("{")) || bytes.HasPrefix(trimmedLine, []byte("[")) {
+						streamErr := statusErr{code: http.StatusBadGateway, msg: string(trimmedLine)}
+						helps.RecordAPIResponseError(ctx, e.cfg, streamErr)
+						reporter.PublishFailure(ctx, streamErr)
+						select {
+						case out <- cliproxyexecutor.StreamChunk{Err: streamErr}:
+						case <-ctx.Done():
+						}
+						failed = true
+					}
+					if failed {
+						break
+					}
+					continue
+				}
+
+				// OpenAI-compatible providers can deliver mid-stream failures as a
+				// proper SSE data line: data: {"error":{...}}. Detect that envelope
+				// before translation so the failure surfaces as a terminal error;
+				// otherwise the chunk translator finds no choices array and drops it,
+				// leaving the stream to end without a terminal event.
+				payload := bytes.TrimSpace(bytes.TrimPrefix(trimmedLine, []byte("data:")))
+				if openAICompatStreamErrorPayload(payload) {
+					streamErr := statusErr{code: openAICompatStreamErrorStatus(payload), msg: string(payload)}
 					helps.RecordAPIResponseError(ctx, e.cfg, streamErr)
 					reporter.PublishFailure(ctx, streamErr)
 					select {
 					case out <- cliproxyexecutor.StreamChunk{Err: streamErr}:
 					case <-ctx.Done():
 					}
-					return
+					failed = true
+					break
 				}
-				continue
-			}
 
-			// OpenAI-compatible streams must use SSE data lines.
-			chunks := helps.TranslateStreamWithClaudeInputTokens(ctx, to, responseFormat, req.Model, opts.OriginalRequest, translated, bytes.Clone(trimmedLine), &param, claudeInputTokens)
-			for i := range chunks {
-				select {
-				case out <- cliproxyexecutor.StreamChunk{Payload: chunks[i]}:
-				case <-ctx.Done():
-					return
+				if contOK {
+					cont.observe(trimmedLine)
+					if cont.isUpstreamDoneLine(trimmedLine) && cont.shouldContinue() {
+						// Stall detected at the terminal marker: do not translate
+						// [DONE] (it would emit the single downstream terminal
+						// event); continue the turn upstream first.
+						continueUpstream = true
+						break
+					}
+					trimmedLine = cont.offsetLine(trimmedLine)
+				}
+
+				// OpenAI-compatible streams must use SSE data lines.
+				chunks := helps.TranslateStreamWithClaudeInputTokens(ctx, to, responseFormat, req.Model, opts.OriginalRequest, currentBody, bytes.Clone(trimmedLine), &param, claudeInputTokens)
+				for i := range chunks {
+					select {
+					case out <- cliproxyexecutor.StreamChunk{Payload: chunks[i]}:
+						if openAICompatResponsesTerminalChunk(chunks[i]) {
+							terminalResponsesEmitted = true
+						}
+					case <-ctx.Done():
+						aborted = true
+						break
+					}
+				}
+				if aborted {
+					break
 				}
 			}
-		}
-		if errScan := scanner.Err(); errScan != nil {
-			helps.RecordAPIResponseError(ctx, e.cfg, errScan)
-			reporter.PublishFailure(ctx, errScan)
-			select {
-			case out <- cliproxyexecutor.StreamChunk{Err: errScan}:
-			case <-ctx.Done():
+			if errClose := passResp.Body.Close(); errClose != nil {
+				log.Errorf("openai compat executor: close response body error: %v", errClose)
 			}
-		} else {
-			// In case the upstream close the stream without a terminal [DONE] marker.
-			// Feed a synthetic done marker through the translator so pending
-			// response.completed events are still emitted exactly once.
-			chunks := helps.TranslateStreamWithClaudeInputTokens(ctx, to, responseFormat, req.Model, opts.OriginalRequest, translated, []byte("data: [DONE]"), &param, claudeInputTokens)
-			for i := range chunks {
-				select {
-				case out <- cliproxyexecutor.StreamChunk{Payload: chunks[i]}:
-				case <-ctx.Done():
-					return
+			if aborted || failed {
+				return
+			}
+			scanErr := scanner.Err()
+			if !continueUpstream {
+				if scanErr != nil {
+					if terminalResponsesEmitted && errors.Is(scanErr, context.Canceled) {
+						// Downstream already consumed the terminal Responses event and
+						// closed; the context cancellation tearing down the upstream
+						// socket is a clean shutdown, not a failure. Usage (if any) was
+						// already observed and is preserved by the deferred publish.
+						log.Debugf("openai compat executor: stream closed with %v after terminal Responses event; treated as clean shutdown", scanErr)
+					} else {
+						helps.RecordAPIResponseError(ctx, e.cfg, scanErr)
+						reporter.PublishFailure(ctx, scanErr)
+						select {
+						case out <- cliproxyexecutor.StreamChunk{Err: scanErr}:
+						case <-ctx.Done():
+						}
+					}
+				} else {
+					// In case the upstream close the stream without a terminal [DONE] marker.
+					// Feed a synthetic done marker through the translator so pending
+					// response.completed events are still emitted exactly once.
+					flushDone()
 				}
+				// Ensure we record the request if no usage chunk was ever seen.
+				finishPass()
+				return
 			}
+			nextBody, okNext := cont.continuationBody(currentBody)
+			if !okNext {
+				flushDone()
+				finishPass()
+				return
+			}
+			log.Infof("openai compat executor: continuing stalled Codex turn without a tool call (model %s, pass %d)", req.Model, cont.passIndex+1)
+			nextResp, errNext := startStream(nextBody)
+			if errNext == nil {
+				helps.RecordAPIResponseMetadata(ctx, e.cfg, nextResp.StatusCode, nextResp.Header.Clone())
+				if nextResp.StatusCode < 200 || nextResp.StatusCode >= 300 {
+					b, _ := io.ReadAll(nextResp.Body)
+					helps.AppendAPIResponseChunk(ctx, e.cfg, b)
+					if errClose := nextResp.Body.Close(); errClose != nil {
+						log.Errorf("openai compat executor: close continuation response body error: %v", errClose)
+					}
+					log.Warnf("openai compat executor: semantic continuation upstream status %d; ending turn with first-pass output", nextResp.StatusCode)
+					errNext = statusErr{code: nextResp.StatusCode, msg: string(b)}
+				}
+			} else {
+				helps.RecordAPIResponseError(ctx, e.cfg, errNext)
+				log.Warnf("openai compat executor: semantic continuation request failed: %v", errNext)
+			}
+			if errNext != nil {
+				// Degrade gracefully: the client still receives a well-formed
+				// terminal event covering the first-pass output.
+				flushDone()
+				finishPass()
+				return
+			}
+			currentBody = nextBody
+			passResp = nextResp
 		}
-		// Ensure we record the request if no usage chunk was ever seen.
-		streamUsage.Publish(ctx, reporter)
-		reporter.EnsurePublished(ctx)
 	}()
 	return &cliproxyexecutor.StreamResult{Headers: httpResp.Header.Clone(), Chunks: out}, nil
 }
@@ -558,7 +683,7 @@ func (e *OpenAICompatExecutor) executeImagesStream(ctx context.Context, auth *cl
 		}
 		helps.AppendAPIResponseChunk(ctx, e.cfg, body)
 		helps.LogWithRequestID(ctx).Debugf("request error, error status: %d, error message: %s", httpResp.StatusCode, helps.SummarizeErrorBody(httpResp.Header.Get("Content-Type"), body))
-		return nil, statusErr{code: httpResp.StatusCode, msg: string(body)}
+		return nil, newOpenAICompatStatusErr(httpResp, body)
 	}
 
 	out := make(chan cliproxyexecutor.StreamChunk)
@@ -859,6 +984,63 @@ func (e *OpenAICompatExecutor) overrideModel(payload []byte, model string) []byt
 	return helps.SetStringIfDifferent(payload, "model", model)
 }
 
+// openAICompatStreamErrorPayload reports whether an SSE data payload is an
+// upstream error envelope. OpenAI-compatible providers surface mid-stream
+// failures as data: {"error":{...}}; a normal chunk carries a choices array
+// and some providers emit "error": null, neither of which is an error.
+// Non-JSON payloads (e.g. the [DONE] sentinel) are never errors.
+func openAICompatStreamErrorPayload(body []byte) bool {
+	if len(body) == 0 || !gjson.ValidBytes(body) {
+		return false
+	}
+	errorResult := gjson.GetBytes(body, "error")
+	if !errorResult.Exists() || errorResult.Type != gjson.JSON {
+		return false
+	}
+	if gjson.GetBytes(body, "choices").Exists() {
+		return false
+	}
+	return true
+}
+
+// openAICompatStreamErrorStatus maps a streamed error envelope to an HTTP
+// status. Numeric code/status fields are honored verbatim; symbolic codes
+// fall through to the shared body classification used for codex terminal
+// failures.
+func openAICompatStreamErrorStatus(body []byte) int {
+	for _, path := range []string{"error.code", "error.status", "error.status_code"} {
+		if status := int(gjson.GetBytes(body, path).Int()); status >= http.StatusBadRequest && status <= 599 {
+			return status
+		}
+	}
+	return codexTerminalFailureStatus(body)
+}
+
+// openAICompatResponsesTerminalChunk reports whether an SSE-framed chunk
+// already translated to the Responses protocol carries a terminal event
+// (response.completed or response.incomplete). The gateway frames translated
+// output as `event:`/`data:` lines, so the data line is parsed as JSON and the
+// top-level `type` field is matched exactly; substring matching would
+// false-positive on event names appearing inside output text, tool calls, or
+// nested response fields.
+func openAICompatResponsesTerminalChunk(chunk []byte) bool {
+	for _, line := range bytes.Split(chunk, []byte("\n")) {
+		trimmed := bytes.TrimSpace(line)
+		if !bytes.HasPrefix(trimmed, []byte("data:")) {
+			continue
+		}
+		payload := bytes.TrimSpace(bytes.TrimPrefix(trimmed, []byte("data:")))
+		if len(payload) == 0 || !gjson.ValidBytes(payload) {
+			continue
+		}
+		switch gjson.GetBytes(payload, "type").String() {
+		case "response.completed", "response.incomplete":
+			return true
+		}
+	}
+	return false
+}
+
 type statusErr struct {
 	code       int
 	msg        string
@@ -873,3 +1055,20 @@ func (e statusErr) Error() string {
 }
 func (e statusErr) StatusCode() int            { return e.code }
 func (e statusErr) RetryAfter() *time.Duration { return e.retryAfter }
+
+// SafeResponseHeaders exposes only the locally-derived retry hint to the API
+// layer so downstream clients can honor the same bounded backoff if the
+// gateway exhausts its own retry budget.
+func (e statusErr) SafeResponseHeaders() http.Header {
+	if e.retryAfter == nil || *e.retryAfter <= 0 {
+		return nil
+	}
+	seconds := int64(*e.retryAfter / time.Second)
+	if *e.retryAfter%time.Second != 0 {
+		seconds++
+	}
+	if seconds < 1 {
+		seconds = 1
+	}
+	return http.Header{"Retry-After": []string{strconv.FormatInt(seconds, 10)}}
+}
