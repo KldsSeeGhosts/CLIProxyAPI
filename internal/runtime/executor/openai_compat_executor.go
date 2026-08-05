@@ -426,13 +426,9 @@ func (e *OpenAICompatExecutor) ExecuteStream(ctx context.Context, auth *cliproxy
 		claudeInputTokens := helps.NewClaudeInputTokenState(from, to, responseFormat, originalPayload)
 		var param any
 		var streamUsage helps.StreamUsageBuffer
-		var seenDone bool
 		// terminalResponsesEmitted records whether a translated downstream chunk
 		// carrying a terminal Responses event (response.completed or
-		// response.incomplete) was already delivered to the output channel. A
-		// codex client consumes that event and closes downstream immediately;
-		// the OpenAI-compatible upstream socket is still closing, so the scan
-		// ends with context.Canceled even though the turn succeeded.
+		// response.incomplete) was already delivered to the output channel.
 		terminalResponsesEmitted := false
 		defer streamUsage.Publish(ctx, reporter)
 		cont, contOK := newCodexContinuationController(ctx, opts.Headers, e.cfg, req.Model, responseFormat, translated)
@@ -456,10 +452,24 @@ func (e *OpenAICompatExecutor) ExecuteStream(ctx context.Context, auth *cliproxy
 			}
 			return true
 		}
+		emitFailure := func(decision codexContinuationDecision) {
+			streamErr := decision.err
+			if streamErr == nil {
+				streamErr = newCodexTerminalIntegrityError(decision.classification, "terminal arbiter rejected the upstream boundary")
+			}
+			log.Warnf("openai compat executor: codex terminal arbiter model=%s boundary_class=%s outcome=%s pass=%d: %v", req.Model, decision.classification, decision.outcome, cont.passIndex, streamErr)
+			helps.RecordAPIResponseError(ctx, e.cfg, streamErr)
+			reporter.PublishFailure(ctx, streamErr)
+			select {
+			case out <- cliproxyexecutor.StreamChunk{Err: streamErr}:
+			case <-ctx.Done():
+			}
+		}
 		for {
 			scanner := bufio.NewScanner(passResp.Body)
 			scanner.Buffer(nil, 52_428_800) // 50MB
 			continueUpstream := false
+			upstreamDoneForwarded := false
 			aborted := false
 			failed := false
 			for scanner.Scan() {
@@ -492,11 +502,6 @@ func (e *OpenAICompatExecutor) ExecuteStream(ctx context.Context, auth *cliproxy
 					continue
 				}
 
-				// OpenAI-compatible providers can deliver mid-stream failures as a
-				// proper SSE data line: data: {"error":{...}}. Detect that envelope
-				// before translation so the failure surfaces as a terminal error;
-				// otherwise the chunk translator finds no choices array and drops it,
-				// leaving the stream to end without a terminal event.
 				payload := bytes.TrimSpace(bytes.TrimPrefix(trimmedLine, []byte("data:")))
 				if openAICompatStreamErrorPayload(payload) {
 					streamErr := statusErr{code: openAICompatStreamErrorStatus(payload), msg: string(payload)}
@@ -510,19 +515,31 @@ func (e *OpenAICompatExecutor) ExecuteStream(ctx context.Context, auth *cliproxy
 					break
 				}
 
+				upstreamDone := isCodexUpstreamDoneLine(trimmedLine)
 				if contOK {
 					cont.observe(trimmedLine)
-					if cont.isUpstreamDoneLine(trimmedLine) && cont.shouldContinue() {
-						// Stall detected at the terminal marker: do not translate
-						// [DONE] (it would emit the single downstream terminal
-						// event); continue the turn upstream first.
-						continueUpstream = true
-						break
+					if upstreamDone {
+						decision := cont.decide(codexContinuationBoundaryExplicitDone, nil)
+						log.Infof("openai compat executor: codex terminal arbiter model=%s boundary=%s classification=%s outcome=%s pass=%d", req.Model, codexContinuationBoundaryExplicitDone, decision.classification, decision.outcome, cont.passIndex)
+						switch decision.outcome {
+						case codexContinuationOutcomeContinue:
+							continueUpstream = true
+							break
+						case codexContinuationOutcomeFail:
+							emitFailure(decision)
+							failed = true
+							break
+						case codexContinuationOutcomeComplete:
+							trimmedLine = cont.offsetLine(trimmedLine)
+						}
+					} else {
+						trimmedLine = cont.offsetLine(trimmedLine)
 					}
-					trimmedLine = cont.offsetLine(trimmedLine)
+				}
+				if continueUpstream || failed {
+					break
 				}
 
-				// OpenAI-compatible streams must use SSE data lines.
 				chunks := helps.TranslateStreamWithClaudeInputTokens(ctx, to, responseFormat, req.Model, opts.OriginalRequest, currentBody, bytes.Clone(trimmedLine), &param, claudeInputTokens)
 				for i := range chunks {
 					select {
@@ -538,13 +555,12 @@ func (e *OpenAICompatExecutor) ExecuteStream(ctx context.Context, auth *cliproxy
 				if aborted {
 					break
 				}
-
-				// OpenAI SSE treats data: [DONE] as the terminal event. Process it
-				// once, then stop so trailing non-spec chunks (e.g. cost metadata
-				// after DONE) are not reordered ahead of the handler-emitted
-				// terminal marker.
-				if bytes.Equal(bytes.TrimSpace(trimmedLine[len("data:"):]), []byte("[DONE]")) {
-					seenDone = true
+				if upstreamDone {
+					// Forwarded the terminal [DONE] marker through the translator;
+					// stop so trailing non-spec chunks (e.g. cost metadata after
+					// DONE) are not reordered ahead of the handler-emitted
+					// terminal marker.
+					upstreamDoneForwarded = true
 					break
 				}
 			}
@@ -554,15 +570,20 @@ func (e *OpenAICompatExecutor) ExecuteStream(ctx context.Context, auth *cliproxy
 			if aborted || failed {
 				return
 			}
+			if upstreamDoneForwarded {
+				finishPass()
+				return
+			}
 			scanErr := scanner.Err()
 			if !continueUpstream {
 				if scanErr != nil {
 					if terminalResponsesEmitted && errors.Is(scanErr, context.Canceled) {
-						// Downstream already consumed the terminal Responses event and
-						// closed; the context cancellation tearing down the upstream
-						// socket is a clean shutdown, not a failure. Usage (if any) was
-						// already observed and is preserved by the deferred publish.
 						log.Debugf("openai compat executor: stream closed with %v after terminal Responses event; treated as clean shutdown", scanErr)
+						finishPass()
+						return
+					}
+					if contOK {
+						emitFailure(cont.decide(codexContinuationBoundaryReadError, scanErr))
 					} else {
 						helps.RecordAPIResponseError(ctx, e.cfg, scanErr)
 						reporter.PublishFailure(ctx, scanErr)
@@ -571,23 +592,44 @@ func (e *OpenAICompatExecutor) ExecuteStream(ctx context.Context, auth *cliproxy
 						case <-ctx.Done():
 						}
 					}
-				} else if !seenDone {
-					// In case the upstream close the stream without a terminal [DONE] marker.
-					// Feed a synthetic done marker through the translator so pending
-					// response.completed events are still emitted exactly once.
-					flushDone()
+					return
 				}
-				// Ensure we record the request if no usage chunk was ever seen.
-				finishPass()
-				return
+				if terminalResponsesEmitted {
+					finishPass()
+					return
+				}
+				if contOK {
+					decision := cont.decide(codexContinuationBoundaryCleanEOF, nil)
+					log.Infof("openai compat executor: codex terminal arbiter model=%s boundary=%s classification=%s outcome=%s pass=%d", req.Model, codexContinuationBoundaryCleanEOF, decision.classification, decision.outcome, cont.passIndex)
+					switch decision.outcome {
+					case codexContinuationOutcomeContinue:
+						continueUpstream = true
+					case codexContinuationOutcomeFail:
+						emitFailure(decision)
+						return
+					case codexContinuationOutcomeComplete:
+						if !flushDone() {
+							return
+						}
+						finishPass()
+						return
+					}
+				} else {
+					flushDone()
+					finishPass()
+					return
+				}
 			}
 			nextBody, okNext := cont.continuationBody(currentBody)
 			if !okNext {
-				flushDone()
-				finishPass()
+				emitFailure(codexContinuationDecision{
+					outcome:        codexContinuationOutcomeFail,
+					classification: "continuation_state_error",
+					err:            newCodexTerminalIntegrityError("continuation_state_error", "terminal arbiter selected continuation but no continuation body could be built"),
+				})
 				return
 			}
-			log.Infof("openai compat executor: continuing stalled Codex turn without a tool call (model %s, pass %d)", req.Model, cont.passIndex+1)
+			log.Infof("openai compat executor: continuing stalled Codex turn without a tool call (model %s, pass %d)", req.Model, cont.passIndex)
 			nextResp, errNext := startStream(nextBody)
 			if errNext == nil {
 				helps.RecordAPIResponseMetadata(ctx, e.cfg, nextResp.StatusCode, nextResp.Header.Clone())
@@ -597,18 +639,18 @@ func (e *OpenAICompatExecutor) ExecuteStream(ctx context.Context, auth *cliproxy
 					if errClose := nextResp.Body.Close(); errClose != nil {
 						log.Errorf("openai compat executor: close continuation response body error: %v", errClose)
 					}
-					log.Warnf("openai compat executor: semantic continuation upstream status %d; ending turn with first-pass output", nextResp.StatusCode)
 					errNext = statusErr{code: nextResp.StatusCode, msg: string(b)}
 				}
-			} else {
-				helps.RecordAPIResponseError(ctx, e.cfg, errNext)
-				log.Warnf("openai compat executor: semantic continuation request failed: %v", errNext)
 			}
 			if errNext != nil {
-				// Degrade gracefully: the client still receives a well-formed
-				// terminal event covering the first-pass output.
-				flushDone()
-				finishPass()
+				emitFailure(codexContinuationDecision{
+					outcome:        codexContinuationOutcomeFail,
+					classification: "continuation_request_failed",
+					err: &codexTerminalIntegrityError{
+						classification: "continuation_request_failed",
+						cause:          fmt.Errorf("semantic continuation request failed: %w", errNext),
+					},
+				})
 				return
 			}
 			currentBody = nextBody
