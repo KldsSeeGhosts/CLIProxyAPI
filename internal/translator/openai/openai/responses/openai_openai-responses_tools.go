@@ -1,6 +1,8 @@
 package responses
 
 import (
+	"encoding/json"
+	"strconv"
 	"strings"
 
 	"github.com/tidwall/gjson"
@@ -80,13 +82,22 @@ func convertResponsesFunctionToolToOpenAIChat(tool gjson.Result, overrideName st
 		return nil, false
 	}
 
-	chatTool := []byte(`{"type":"function","function":{"name":"","description":"","parameters":{}}}`)
+	chatTool := []byte(`{"type":"function","function":{"name":"","description":"","parameters":{"type":"object","properties":{}}}}`)
 	chatTool, _ = sjson.SetBytes(chatTool, "function.name", name)
 	if description := responsesToolDescription(tool); description != "" {
 		chatTool, _ = sjson.SetBytes(chatTool, "function.description", description)
 	}
 	if parameters := responsesToolParameters(tool); parameters.Exists() {
-		chatTool, _ = sjson.SetRawBytes(chatTool, "function.parameters", []byte(parameters.Raw))
+		parameterJSON := []byte(parameters.Raw)
+		if parameters.IsObject() {
+			// Chat Completions function arguments are always JSON objects. Some
+			// strict providers, including Kimi, reject otherwise valid union-root
+			// schemas unless this root type is stated explicitly.
+			parameterJSON, _ = sjson.SetBytes(parameterJSON, "type", "object")
+		} else {
+			parameterJSON = []byte(`{"type":"object","properties":{}}`)
+		}
+		chatTool, _ = sjson.SetRawBytes(chatTool, "function.parameters", parameterJSON)
 	}
 	return chatTool, true
 }
@@ -237,6 +248,80 @@ func unwrapCustomToolInput(arguments string) string {
 			input = v.Raw
 		}
 	}
+}
+
+func normalizeCustomToolInput(name, arguments string) string {
+	input := unwrapCustomToolInput(arguments)
+	if name != "exec" && !strings.HasSuffix(name, "__exec") {
+		return input
+	}
+	obj := gjson.Parse(input)
+	if !obj.Exists() || !obj.IsObject() {
+		if strings.Contains(input, "tools.exec_command") || strings.TrimSpace(input) == "" {
+			return input
+		}
+		return "const r = await tools.exec_command({cmd:" + jsonString(input) + "}); text(r.output);"
+	}
+	command := strings.TrimSpace(obj.Get("command").String())
+	if command == "" {
+		command = strings.TrimSpace(obj.Get("cmd").String())
+	}
+	if command == "" {
+		if strings.Contains(input, "tools.exec_command") || strings.TrimSpace(input) == "" {
+			return input
+		}
+		return "const r = await tools.exec_command({cmd:" + jsonString(input) + "}); text(r.output);"
+	}
+	fields := []string{"cmd:" + jsonString(command)}
+	appendString := func(key string) {
+		if value := obj.Get(key); value.Exists() && value.Type == gjson.String && value.String() != "" {
+			fields = append(fields, key+":"+jsonString(value.String()))
+		}
+	}
+	appendString("workdir")
+	appendString("shell")
+	appendString("justification")
+	appendString("sandbox_permissions")
+	appendString("tty")
+	appendString("login")
+	if timeout := positiveInt(obj.Get("timeout_ms")); timeout > 0 {
+		if timeout < 250 {
+			timeout = 250
+		}
+		if timeout > 30000 {
+			timeout = 30000
+		}
+		fields = append(fields, "yield_time_ms:"+strconv.Itoa(timeout))
+	}
+	if maxTokens := positiveInt(obj.Get("max_output_tokens")); maxTokens > 0 {
+		fields = append(fields, "max_output_tokens:"+strconv.Itoa(maxTokens))
+	}
+	return "const r = await tools.exec_command({" + strings.Join(fields, ", ") + "}); text(r.output);"
+}
+
+func jsonString(value string) string {
+	encoded, err := json.Marshal(value)
+	if err != nil {
+		return `""`
+	}
+	return string(encoded)
+}
+
+func positiveInt(value gjson.Result) int {
+	if !value.Exists() {
+		return 0
+	}
+	if value.Type == gjson.Number {
+		if n := int(value.Int()); n > 0 {
+			return n
+		}
+		return 0
+	}
+	n, _ := strconv.Atoi(strings.TrimSpace(value.String()))
+	if n > 0 {
+		return n
+	}
+	return 0
 }
 
 func qualifyResponsesNamespaceToolName(namespaceName, childName string) string {

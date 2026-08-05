@@ -315,7 +315,7 @@ attemptLoop:
 					}
 
 					payload = e.resolveWebSearchGroundingURLs(ctx, auth, from, originalPayload, translated, payload)
-					chunks := helps.TranslateStreamWithClaudeInputTokens(ctx, to, responseFormat, req.Model, opts.OriginalRequest, translated, bytes.Clone(payload), &param, claudeInputTokens)
+					chunks := helps.TranslateStreamWithClaudeInputTokens(ctx, to, responseFormat, req.Model, originalPayload, translated, bytes.Clone(payload), &param, claudeInputTokens)
 					for i := range chunks {
 						select {
 						case out <- cliproxyexecutor.StreamChunk{Payload: chunks[i]}:
@@ -324,7 +324,7 @@ attemptLoop:
 						}
 					}
 				}
-				tail := helps.TranslateStreamWithClaudeInputTokens(ctx, to, responseFormat, req.Model, opts.OriginalRequest, translated, []byte("[DONE]"), &param, claudeInputTokens)
+				tail := helps.TranslateStreamWithClaudeInputTokens(ctx, to, responseFormat, req.Model, originalPayload, translated, []byte("[DONE]"), &param, claudeInputTokens)
 				for i := range tail {
 					select {
 					case out <- cliproxyexecutor.StreamChunk{Payload: tail[i]}:

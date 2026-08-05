@@ -25,6 +25,7 @@ type oaiToResponsesState struct {
 	Created          int64
 	Started          bool
 	CompletedEmitted bool
+	FinishReason     string // terminal finish_reason observed upstream; consumed by the [DONE] branch
 	ReasoningID      string
 	ReasoningIndex   int
 	// aggregation buffers for response.output
@@ -67,73 +68,102 @@ func emitRespEvent(event string, payload []byte) []byte {
 	return translatorcommon.SSEEventData(event, payload)
 }
 
-func buildResponsesCompletedEvent(st *oaiToResponsesState, requestRawJSON []byte, nextSeq func() int) []byte {
-	completed := []byte(`{"type":"response.completed","sequence_number":0,"response":{"id":"","object":"response","created_at":0,"status":"completed","background":false,"error":null}}`)
-	completed, _ = sjson.SetBytes(completed, "sequence_number", nextSeq())
-	completed, _ = sjson.SetBytes(completed, "response.id", st.ResponseID)
-	completed, _ = sjson.SetBytes(completed, "response.created_at", st.Created)
+// terminalOutcomeForFinishReason maps the upstream Chat Completions terminal
+// finish_reason to the Responses terminal event vocabulary. "length" means the
+// upstream cut the turn short at max_output_tokens, so the stream must end with
+// response.incomplete — never a false response.completed. "content_filter" is a
+// filtered turn, likewise not a clean success; its reason is a value OpenAI's
+// schema defines for incomplete_details (mirrors the sibling translators). Every
+// remaining reason (stop, tool_calls, function_call, empty) keeps the completed
+// outcome.
+func terminalOutcomeForFinishReason(finishReason string) (eventType, status, incompleteReason string) {
+	switch finishReason {
+	case "length":
+		return "response.incomplete", "incomplete", "max_output_tokens"
+	case "content_filter":
+		return "response.incomplete", "incomplete", "content_filter"
+	default:
+		return "response.completed", "completed", ""
+	}
+}
+
+// buildResponsesTerminalEvent assembles the single terminal SSE event that ends a
+// translated stream. The event type and response.status follow the terminal
+// finish_reason recorded on the state; the request-field injection and output-item
+// assembly below are shared by every outcome.
+func buildResponsesTerminalEvent(st *oaiToResponsesState, requestRawJSON []byte, nextSeq func() int) []byte {
+	eventType, status, incompleteReason := terminalOutcomeForFinishReason(st.FinishReason)
+	terminal := []byte(`{"type":"response.completed","sequence_number":0,"response":{"id":"","object":"response","created_at":0,"status":"completed","background":false,"error":null}}`)
+	terminal, _ = sjson.SetBytes(terminal, "type", eventType)
+	terminal, _ = sjson.SetBytes(terminal, "sequence_number", nextSeq())
+	terminal, _ = sjson.SetBytes(terminal, "response.id", st.ResponseID)
+	terminal, _ = sjson.SetBytes(terminal, "response.created_at", st.Created)
+	terminal, _ = sjson.SetBytes(terminal, "response.status", status)
+	if incompleteReason != "" {
+		terminal, _ = sjson.SetBytes(terminal, "response.incomplete_details.reason", incompleteReason)
+	}
 	// Inject original request fields into response as per docs/response.completed.json
 	if requestRawJSON != nil {
 		req := gjson.ParseBytes(requestRawJSON)
 		if v := req.Get("instructions"); v.Exists() {
-			completed, _ = sjson.SetBytes(completed, "response.instructions", v.String())
+			terminal, _ = sjson.SetBytes(terminal, "response.instructions", v.String())
 		}
 		if v := req.Get("max_output_tokens"); v.Exists() {
-			completed, _ = sjson.SetBytes(completed, "response.max_output_tokens", v.Int())
+			terminal, _ = sjson.SetBytes(terminal, "response.max_output_tokens", v.Int())
 		}
 		if v := req.Get("max_tool_calls"); v.Exists() {
-			completed, _ = sjson.SetBytes(completed, "response.max_tool_calls", v.Int())
+			terminal, _ = sjson.SetBytes(terminal, "response.max_tool_calls", v.Int())
 		}
 		if v := req.Get("model"); v.Exists() {
-			completed, _ = sjson.SetBytes(completed, "response.model", v.String())
+			terminal, _ = sjson.SetBytes(terminal, "response.model", v.String())
 		}
 		if v := req.Get("parallel_tool_calls"); v.Exists() {
-			completed, _ = sjson.SetBytes(completed, "response.parallel_tool_calls", v.Bool())
+			terminal, _ = sjson.SetBytes(terminal, "response.parallel_tool_calls", v.Bool())
 		}
 		if v := req.Get("previous_response_id"); v.Exists() {
-			completed, _ = sjson.SetBytes(completed, "response.previous_response_id", v.String())
+			terminal, _ = sjson.SetBytes(terminal, "response.previous_response_id", v.String())
 		}
 		if v := req.Get("prompt_cache_key"); v.Exists() {
-			completed, _ = sjson.SetBytes(completed, "response.prompt_cache_key", v.String())
+			terminal, _ = sjson.SetBytes(terminal, "response.prompt_cache_key", v.String())
 		}
 		if v := req.Get("reasoning"); v.Exists() {
-			completed, _ = sjson.SetBytes(completed, "response.reasoning", v.Value())
+			terminal, _ = sjson.SetBytes(terminal, "response.reasoning", v.Value())
 		}
 		if v := req.Get("safety_identifier"); v.Exists() {
-			completed, _ = sjson.SetBytes(completed, "response.safety_identifier", v.String())
+			terminal, _ = sjson.SetBytes(terminal, "response.safety_identifier", v.String())
 		}
 		if v := req.Get("service_tier"); v.Exists() {
-			completed, _ = sjson.SetBytes(completed, "response.service_tier", v.String())
+			terminal, _ = sjson.SetBytes(terminal, "response.service_tier", v.String())
 		}
 		if v := req.Get("store"); v.Exists() {
-			completed, _ = sjson.SetBytes(completed, "response.store", v.Bool())
+			terminal, _ = sjson.SetBytes(terminal, "response.store", v.Bool())
 		}
 		if v := req.Get("temperature"); v.Exists() {
-			completed, _ = sjson.SetBytes(completed, "response.temperature", v.Float())
+			terminal, _ = sjson.SetBytes(terminal, "response.temperature", v.Float())
 		}
 		if v := req.Get("text"); v.Exists() {
-			completed, _ = sjson.SetBytes(completed, "response.text", v.Value())
+			terminal, _ = sjson.SetBytes(terminal, "response.text", v.Value())
 		}
 		if v := req.Get("tool_choice"); v.Exists() {
-			completed, _ = sjson.SetBytes(completed, "response.tool_choice", v.Value())
+			terminal, _ = sjson.SetBytes(terminal, "response.tool_choice", v.Value())
 		}
 		if v := req.Get("tools"); v.Exists() {
-			completed, _ = sjson.SetBytes(completed, "response.tools", v.Value())
+			terminal, _ = sjson.SetBytes(terminal, "response.tools", v.Value())
 		}
 		if v := req.Get("top_logprobs"); v.Exists() {
-			completed, _ = sjson.SetBytes(completed, "response.top_logprobs", v.Int())
+			terminal, _ = sjson.SetBytes(terminal, "response.top_logprobs", v.Int())
 		}
 		if v := req.Get("top_p"); v.Exists() {
-			completed, _ = sjson.SetBytes(completed, "response.top_p", v.Float())
+			terminal, _ = sjson.SetBytes(terminal, "response.top_p", v.Float())
 		}
 		if v := req.Get("truncation"); v.Exists() {
-			completed, _ = sjson.SetBytes(completed, "response.truncation", v.String())
+			terminal, _ = sjson.SetBytes(terminal, "response.truncation", v.String())
 		}
 		if v := req.Get("user"); v.Exists() {
-			completed, _ = sjson.SetBytes(completed, "response.user", v.Value())
+			terminal, _ = sjson.SetBytes(terminal, "response.user", v.Value())
 		}
 		if v := req.Get("metadata"); v.Exists() {
-			completed, _ = sjson.SetBytes(completed, "response.metadata", v.Value())
+			terminal, _ = sjson.SetBytes(terminal, "response.metadata", v.Value())
 		}
 	}
 
@@ -174,7 +204,7 @@ func buildResponsesCompletedEvent(st *oaiToResponsesState, requestRawJSON []byte
 			if st.FuncItemCustom[key] {
 				item := []byte(`{"id":"","type":"custom_tool_call","status":"completed","input":"","call_id":"","name":""}`)
 				item, _ = sjson.SetBytes(item, "id", fmt.Sprintf("ctc_%s", callID))
-				item, _ = sjson.SetBytes(item, "input", unwrapCustomToolInput(args))
+				item, _ = sjson.SetBytes(item, "input", normalizeCustomToolInput(name, args))
 				item, _ = sjson.SetBytes(item, "call_id", callID)
 				item, _ = sjson.SetBytes(item, "name", name)
 				outputItems = append(outputItems, completedOutputItem{index: st.FuncOutputIx[key], raw: item})
@@ -193,22 +223,22 @@ func buildResponsesCompletedEvent(st *oaiToResponsesState, requestRawJSON []byte
 		outputsWrapper, _ = sjson.SetRawBytes(outputsWrapper, "arr.-1", item.raw)
 	}
 	if gjson.GetBytes(outputsWrapper, "arr.#").Int() > 0 {
-		completed, _ = sjson.SetRawBytes(completed, "response.output", []byte(gjson.GetBytes(outputsWrapper, "arr").Raw))
+		terminal, _ = sjson.SetRawBytes(terminal, "response.output", []byte(gjson.GetBytes(outputsWrapper, "arr").Raw))
 	}
 	if st.UsageSeen {
-		completed, _ = sjson.SetBytes(completed, "response.usage.input_tokens", st.PromptTokens)
-		completed, _ = sjson.SetBytes(completed, "response.usage.input_tokens_details.cached_tokens", st.CachedTokens)
-		completed, _ = sjson.SetBytes(completed, "response.usage.output_tokens", st.CompletionTokens)
+		terminal, _ = sjson.SetBytes(terminal, "response.usage.input_tokens", st.PromptTokens)
+		terminal, _ = sjson.SetBytes(terminal, "response.usage.input_tokens_details.cached_tokens", st.CachedTokens)
+		terminal, _ = sjson.SetBytes(terminal, "response.usage.output_tokens", st.CompletionTokens)
 		if st.ReasoningTokens > 0 {
-			completed, _ = sjson.SetBytes(completed, "response.usage.output_tokens_details.reasoning_tokens", st.ReasoningTokens)
+			terminal, _ = sjson.SetBytes(terminal, "response.usage.output_tokens_details.reasoning_tokens", st.ReasoningTokens)
 		}
 		total := st.TotalTokens
 		if total == 0 {
 			total = st.PromptTokens + st.CompletionTokens
 		}
-		completed, _ = sjson.SetBytes(completed, "response.usage.total_tokens", total)
+		terminal, _ = sjson.SetBytes(terminal, "response.usage.total_tokens", total)
 	}
-	return emitRespEvent("response.completed", completed)
+	return emitRespEvent(eventType, terminal)
 }
 
 // ConvertOpenAIChatCompletionsResponseToOpenAIResponses converts OpenAI Chat Completions streaming chunks
@@ -245,11 +275,39 @@ func ConvertOpenAIChatCompletionsResponseToOpenAIResponses(ctx context.Context, 
 	}
 	requestForNamespace := pickRequestJSON(originalRequestRawJSON, requestRawJSON)
 	if bytes.Equal(rawJSON, []byte("[DONE]")) {
-		if st.Started && !st.CompletedEmitted {
-			st.CompletedEmitted = true
-			return [][]byte{buildResponsesCompletedEvent(st, requestForNamespace, func() int { st.Seq++; return st.Seq })}
+		if st.CompletedEmitted {
+			// Exactly one terminal event per stream: ignore repeated [DONE] markers
+			// and markers arriving after a finish_reason already finalized the turn.
+			return [][]byte{}
 		}
-		return [][]byte{}
+		st.CompletedEmitted = true
+		nextSeq := func() int { st.Seq++; return st.Seq }
+		if st.Started {
+			return [][]byte{buildResponsesTerminalEvent(st, requestForNamespace, nextSeq)}
+		}
+		// No chunk ever carried a valid choices array (e.g. the upstream errored
+		// mid-stream or sent only usage-shaped chunks). Synthesize the minimal
+		// prologue — response.created then response.in_progress — before the
+		// terminal event, keeping the stream well-formed and sequence numbers
+		// monotonic.
+		if st.ResponseID == "" {
+			st.ResponseID = fmt.Sprintf("resp_%x_%d", time.Now().UnixNano(), atomic.AddUint64(&responseIDCounter, 1))
+		}
+		if st.Created == 0 {
+			st.Created = time.Now().Unix()
+		}
+		created := []byte(`{"type":"response.created","sequence_number":0,"response":{"id":"","object":"response","created_at":0,"status":"in_progress","background":false,"error":null,"output":[]}}`)
+		created, _ = sjson.SetBytes(created, "sequence_number", nextSeq())
+		created, _ = sjson.SetBytes(created, "response.id", st.ResponseID)
+		created, _ = sjson.SetBytes(created, "response.created_at", st.Created)
+		events := [][]byte{emitRespEvent("response.created", created)}
+
+		inprog := []byte(`{"type":"response.in_progress","sequence_number":0,"response":{"id":"","object":"response","created_at":0,"status":"in_progress"}}`)
+		inprog, _ = sjson.SetBytes(inprog, "sequence_number", nextSeq())
+		inprog, _ = sjson.SetBytes(inprog, "response.id", st.ResponseID)
+		inprog, _ = sjson.SetBytes(inprog, "response.created_at", st.Created)
+		events = append(events, emitRespEvent("response.in_progress", inprog))
+		return append(events, buildResponsesTerminalEvent(st, requestForNamespace, nextSeq))
 	}
 
 	root := gjson.ParseBytes(rawJSON)
@@ -390,6 +448,7 @@ func ConvertOpenAIChatCompletionsResponseToOpenAIResponses(ctx context.Context, 
 		st.ReasoningTokens = 0
 		st.UsageSeen = false
 		st.CompletedEmitted = false
+		st.FinishReason = ""
 		// response.created
 		created := []byte(`{"type":"response.created","sequence_number":0,"response":{"id":"","object":"response","created_at":0,"status":"in_progress","background":false,"error":null,"output":[]}}`)
 		created, _ = sjson.SetBytes(created, "sequence_number", nextSeq())
@@ -577,6 +636,9 @@ func ConvertOpenAIChatCompletionsResponseToOpenAIResponses(ctx context.Context, 
 			// deferred until the terminal [DONE] marker so late usage-only chunks can
 			// still populate response.usage.
 			if fr := choice.Get("finish_reason"); fr.Exists() && fr.String() != "" {
+				// Record the terminal finish_reason: the [DONE] branch consumes it to
+				// pick the response.completed / response.incomplete terminal outcome.
+				st.FinishReason = fr.String()
 				// Emit message done events for all indices that started a message
 				if len(st.MsgItemAdded) > 0 {
 					// sort indices for deterministic order
@@ -648,7 +710,7 @@ func ConvertOpenAIChatCompletionsResponseToOpenAIResponses(ctx context.Context, 
 							args = b.String()
 						}
 						if st.FuncItemCustom[key] {
-							input := unwrapCustomToolInput(args)
+							input := normalizeCustomToolInput(st.FuncNames[key], args)
 							inputDone := []byte(`{"type":"response.custom_tool_call_input.done","sequence_number":0,"item_id":"","output_index":0,"input":""}`)
 							inputDone, _ = sjson.SetBytes(inputDone, "sequence_number", nextSeq())
 							inputDone, _ = sjson.SetBytes(inputDone, "item_id", fmt.Sprintf("ctc_%s", callID))
@@ -844,7 +906,7 @@ func ConvertOpenAIChatCompletionsResponseToOpenAIResponsesNonStream(_ context.Co
 						if _, isCustomTool := customToolNames[name]; isCustomTool {
 							item := []byte(`{"id":"","type":"custom_tool_call","status":"completed","input":"","call_id":"","name":""}`)
 							item, _ = sjson.SetBytes(item, "id", fmt.Sprintf("ctc_%s", callID))
-							item, _ = sjson.SetBytes(item, "input", unwrapCustomToolInput(args))
+							item, _ = sjson.SetBytes(item, "input", normalizeCustomToolInput(name, args))
 							item, _ = sjson.SetBytes(item, "call_id", callID)
 							item, _ = sjson.SetBytes(item, "name", name)
 							outputsWrapper, _ = sjson.SetRawBytes(outputsWrapper, "arr.-1", item)

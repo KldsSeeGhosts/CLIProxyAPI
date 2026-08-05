@@ -476,6 +476,51 @@ func TestConvertOpenAIResponsesRequestToOpenAIChatCompletions_QualifiesNamespace
 	}
 }
 
+func TestConvertOpenAIResponsesRequestToOpenAIChatCompletions_AddsObjectTypeToUnionRootToolSchema(t *testing.T) {
+	raw := []byte(`{
+		"model":"kimi-k3-256k",
+		"input":"continue",
+		"tools":[{
+			"type":"namespace",
+			"name":"codex_app",
+			"tools":[{
+				"type":"function",
+				"name":"automation_update",
+				"parameters":{
+					"$schema":"https://json-schema.org/draft/2020-12/schema",
+					"oneOf":[
+						{"type":"object","properties":{"mode":{"const":"view"}},"required":["mode"]},
+						{"type":"object","properties":{"mode":{"const":"create"}},"required":["mode"]}
+					],
+					"$defs":{"id":{"type":"string"}}
+				}
+			}]
+		}]
+	}`)
+
+	out := ConvertOpenAIResponsesRequestToOpenAIChatCompletions("kimi-k3-256k", raw, false)
+	if got := gjson.GetBytes(out, "tools.0.function.name").String(); got != "codex_app__automation_update" {
+		t.Fatalf("tool name = %q, want codex_app__automation_update; output=%s", got, out)
+	}
+	if got := gjson.GetBytes(out, "tools.0.function.parameters.type").String(); got != "object" {
+		t.Fatalf("parameters.type = %q, want object; output=%s", got, out)
+	}
+	if got := gjson.GetBytes(out, "tools.0.function.parameters.oneOf.#").Int(); got != 2 {
+		t.Fatalf("oneOf branch count = %d, want 2; output=%s", got, out)
+	}
+	if got := gjson.GetBytes(out, "tools.0.function.parameters.$defs.id.type").String(); got != "string" {
+		t.Fatalf("$defs.id.type = %q, want string; output=%s", got, out)
+	}
+}
+
+func TestConvertOpenAIResponsesRequestToOpenAIChatCompletions_DefaultsMissingFunctionSchemaToObject(t *testing.T) {
+	raw := []byte(`{"model":"kimi-k3-256k","input":"continue","tools":[{"type":"function","name":"ping"}]}`)
+	out := ConvertOpenAIResponsesRequestToOpenAIChatCompletions("kimi-k3-256k", raw, false)
+	if got := gjson.GetBytes(out, "tools.0.function.parameters.type").String(); got != "object" {
+		t.Fatalf("parameters.type = %q, want object; output=%s", got, out)
+	}
+}
+
 func TestConvertOpenAIResponsesRequestToOpenAIChatCompletions_FlattensNamespaceCustomTools(t *testing.T) {
 	tests := []struct {
 		name string

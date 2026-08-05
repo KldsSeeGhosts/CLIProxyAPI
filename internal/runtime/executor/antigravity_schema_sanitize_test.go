@@ -568,3 +568,27 @@ func TestAntigravityBuildRequestStripsPropertyNamesFromOutboundBody(t *testing.T
 		}
 	}
 }
+
+// TestAntigravityBuildRequestStripsEncryptedSchemaMetadataFromOutboundBody covers the Claude
+// tool shape that the private Gemini backend rejects as an unknown schema field.
+func TestAntigravityBuildRequestStripsEncryptedSchemaMetadataFromOutboundBody(t *testing.T) {
+	schema := `{"type":"object","properties":{
+		"value":{"type":"string","encrypted":true},
+		"encrypted":{"type":"boolean","description":"property name should survive"}
+	}}`
+	payload := []byte(`{"request":{"tools":[{"function_declarations":[{"name":"t","parametersJsonSchema":` + schema + `}]}]}}`)
+
+	body := buildRequestBodyFromRawPayload(t, "claude-sonnet-4-6-thinking", payload)
+	encoded, errMarshal := json.Marshal(body)
+	if errMarshal != nil {
+		t.Fatal(errMarshal)
+	}
+
+	toolSchema := gjson.GetBytes(encoded, "request.tools.0.function_declarations.0.parameters")
+	if toolSchema.Get("properties.value.encrypted").Exists() {
+		t.Fatalf("encrypted schema metadata reached upstream: %s", toolSchema.Raw)
+	}
+	if !toolSchema.Get("properties.encrypted").Exists() {
+		t.Fatalf("property named encrypted was removed: %s", toolSchema.Raw)
+	}
+}

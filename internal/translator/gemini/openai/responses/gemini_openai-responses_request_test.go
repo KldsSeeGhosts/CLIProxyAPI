@@ -1061,3 +1061,78 @@ func validResponsesGPTReasoningSignature() string {
 	}
 	return base64.URLEncoding.EncodeToString(raw)
 }
+
+func TestConvertOpenAIResponsesRequestToGemini_CustomToolsDeclareAndReplay(t *testing.T) {
+	inputJSON := `{
+		"model":"gemini-3.6-flash-high",
+		"tools":[
+			{"type":"custom","name":"exec","description":"Run shell commands"},
+			{"type":"namespace","name":"shell","tools":[{"type":"custom","name":"inspect"}]}
+		],
+		"input":[
+			{"type":"additional_tools","tools":[{"type":"custom","name":"write_file"}]},
+			{"type":"custom_tool_call","call_id":"call-exec","name":"exec","input":"const r = await tools.exec_command({cmd:\"pwd\"}); text(r.output);"},
+			{"type":"custom_tool_call_output","call_id":"call-exec","output":"/tmp"}
+		]
+	}`
+	result := ConvertOpenAIResponsesRequestToGemini("gemini-3.6-flash-high", []byte(inputJSON), false)
+	declarations := gjson.GetBytes(result, "tools.0.functionDeclarations").Array()
+	if len(declarations) != 3 {
+		t.Fatalf("function declarations = %d, want 3; result=%s", len(declarations), result)
+	}
+	declByName := make(map[string]gjson.Result, len(declarations))
+	for _, declaration := range declarations {
+		declByName[declaration.Get("name").String()] = declaration
+	}
+	for _, name := range []string{"exec", "shell__inspect", "write_file"} {
+		decl, ok := declByName[name]
+		if !ok {
+			t.Fatalf("missing declaration %q; result=%s", name, result)
+		}
+		if decl.Get("parametersJsonSchema.properties.input.type").String() != "string" {
+			t.Fatalf("custom declaration %q lacks string input schema: %s", name, decl)
+		}
+	}
+	var calls []gjson.Result
+	for _, content := range gjson.GetBytes(result, "contents").Array() {
+		for _, part := range content.Get("parts").Array() {
+			if functionCall := part.Get("functionCall"); functionCall.Exists() {
+				calls = append(calls, functionCall)
+			}
+		}
+	}
+	if len(calls) != 1 {
+		t.Fatalf("function calls = %d, want 1; result=%s", len(calls), result)
+	}
+	if got := calls[0].Get("name").String(); got != "exec" {
+		t.Fatalf("replayed custom call name = %q", got)
+	}
+	if got := calls[0].Get("args.input").String(); got != `const r = await tools.exec_command({cmd:"pwd"}); text(r.output);` {
+		t.Fatalf("replayed custom call input = %q", got)
+	}
+	var responses []gjson.Result
+	for _, content := range gjson.GetBytes(result, "contents").Array() {
+		for _, part := range content.Get("parts").Array() {
+			if functionResponse := part.Get("functionResponse"); functionResponse.Exists() {
+				responses = append(responses, functionResponse)
+			}
+		}
+	}
+	if len(responses) != 1 || responses[0].Get("name").String() != "exec" || responses[0].Get("response.result").String() != "/tmp" {
+		t.Fatalf("custom output was not replayed as function response: %s", result)
+	}
+}
+
+func TestConvertOpenAIResponsesRequestToGemini_CustomExecLegacyArgumentsNormalizeToCodeMode(t *testing.T) {
+	inputJSON := `{
+		"model":"gemini-3.6-flash-high",
+		"tools":[{"type":"custom","name":"exec"}],
+		"input":[{"type":"custom_tool_call","call_id":"call-exec","name":"exec","input":{"command":"pwd","timeout_ms":"10000"}}]
+	}`
+	result := ConvertOpenAIResponsesRequestToGemini("gemini-3.6-flash-high", []byte(inputJSON), false)
+	got := gjson.GetBytes(result, "contents.0.parts.0.functionCall.args.input").String()
+	want := `const r = await tools.exec_command({cmd:"pwd", yield_time_ms:10000}); text(r.output);`
+	if got != want {
+		t.Fatalf("normalized custom exec input = %q, want %q; result=%s", got, want, result)
+	}
+}

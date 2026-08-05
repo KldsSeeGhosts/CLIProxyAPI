@@ -1,6 +1,7 @@
 package responses
 
 import (
+	"context"
 	"encoding/base64"
 	"strings"
 	"testing"
@@ -263,5 +264,18 @@ func TestConvertOpenAIResponsesRequestToAntigravity_GeminiReasoningUsesNativeTho
 	}
 	if got := parts[0].Get("thoughtSignature").String(); got != sig {
 		t.Fatalf("parts[0].thoughtSignature = %q, want preserved Gemini signature. Output: %s", got, out)
+	}
+}
+
+func TestConvertAntigravityResponseToOpenAIResponsesNonStream_PreservesCustomToolWithoutRequestWrapper(t *testing.T) {
+	request := []byte(`{"model":"claude-sonnet-4-6-thinking","tools":[{"type":"custom","name":"exec"}]}`)
+	provider := []byte(`{"response":{"candidates":[{"content":{"role":"model","parts":[{"functionCall":{"name":"exec","args":{"command":"pwd","timeout_ms":"10000"}}}]},"finishReason":"STOP"}],"responseId":"antigravity-custom"}}`)
+	out := ConvertAntigravityResponseToOpenAIResponsesNonStream(context.Background(), "claude-sonnet-4-6-thinking", request, request, provider, nil)
+	if got := gjson.GetBytes(out, "output.0.type").String(); got != "custom_tool_call" {
+		t.Fatalf("output type = %q, want custom_tool_call; response=%s", got, out)
+	}
+	input := gjson.GetBytes(out, "output.0.input").String()
+	if !strings.Contains(input, "tools.exec_command") {
+		t.Fatalf("custom input was not preserved as code mode: %q; response=%s", input, out)
 	}
 }

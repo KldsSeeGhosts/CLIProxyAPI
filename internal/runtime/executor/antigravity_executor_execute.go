@@ -258,7 +258,7 @@ attemptLoop:
 			bodyBytes = e.resolveWebSearchGroundingURLs(ctx, auth, from, originalPayload, translated, bodyBytes)
 			reporter.Publish(ctx, helps.ParseAntigravityUsage(bodyBytes))
 			var param any
-			converted := sdktranslator.TranslateNonStream(ctx, to, responseFormat, req.Model, opts.OriginalRequest, translated, bodyBytes, &param)
+			converted := sdktranslator.TranslateNonStream(ctx, to, responseFormat, req.Model, originalPayload, translated, bodyBytes, &param)
 			resp = cliproxyexecutor.Response{Payload: converted, Headers: httpResp.Header.Clone()}
 			reporter.EnsurePublished(ctx)
 			return resp, nil

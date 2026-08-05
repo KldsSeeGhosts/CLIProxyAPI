@@ -25,6 +25,8 @@ const (
 	codexCollaborationNamespace           = "collaboration"
 	codexOptimizedCollaborationNamespace  = "collaboration-optimize"
 	codexOptimizedCollaborationNamePrefix = codexOptimizedCollaborationNamespace + "__"
+	codexExternalCompletionContractMarker = "Codex external-agent completion contract:"
+	codexExternalCompletionContract       = codexExternalCompletionContractMarker + " Continue working until the requested task is actually complete. If you say you will run, check, inspect, verify, wait for, poll, test, or confirm something, perform the corresponding tool call in the same response. Do not end a response with a progress update, an announced next step, or a promise to act. While work is pending, call the appropriate tool instead of returning assistant text. Return a final assistant message only after all required tool calls and pending checks are complete."
 )
 
 // codexCollaborationMessageTools are the collaboration tool names whose
@@ -71,8 +73,40 @@ func RewriteCodexMultiAgentV2Input(ctx context.Context, headers http.Header, pay
 func TranslateRequestWithCodexMultiAgentV2(ctx context.Context, headers http.Header, cfg *config.Config, from, to sdktranslator.Format, model string, payload []byte, stream bool) []byte {
 	if from == sdktranslator.FormatOpenAIResponse && to != sdktranslator.FormatCodex && to != sdktranslator.FormatOpenAIResponse {
 		payload = RewriteCodexMultiAgentV2Input(ctx, headers, payload, cfg)
+		payload = reinforceCodexExternalCompletionContract(ctx, headers, payload, cfg)
 	}
 	return sdktranslator.TranslateRequest(from, to, model, payload, stream)
+}
+
+func reinforceCodexExternalCompletionContract(ctx context.Context, headers http.Header, payload []byte, cfg *config.Config) []byte {
+	if !codexMultiAgentV2Enabled(ctx, headers, cfg) || !hasCodexExecutableTools(payload) || !gjson.ValidBytes(payload) {
+		return payload
+	}
+	instructions := gjson.GetBytes(payload, "instructions").String()
+	if strings.Contains(instructions, codexExternalCompletionContractMarker) {
+		return payload
+	}
+	if strings.TrimSpace(instructions) != "" {
+		instructions += "\n\n"
+	}
+	instructions += codexExternalCompletionContract
+	updated, err := sjson.SetBytes(payload, "instructions", instructions)
+	if err != nil {
+		return payload
+	}
+	return updated
+}
+
+func hasCodexExecutableTools(payload []byte) bool {
+	if gjson.GetBytes(payload, "tools.#").Int() > 0 {
+		return true
+	}
+	for _, item := range gjson.GetBytes(payload, "input").Array() {
+		if item.Get("type").String() == "additional_tools" && item.Get("tools.#").Int() > 0 {
+			return true
+		}
+	}
+	return false
 }
 
 // OptimizeCodexMultiAgentV2Request rewrites an eligible spawn_agent request and
@@ -125,9 +159,30 @@ func headerValueCaseInsensitive(headers http.Header, name string) string {
 	return ""
 }
 
+// codexMultiAgentClientPrefixes are the known Codex client family User-Agent
+// prefixes eligible for multi-agent v2 optimization. Matching lowercases the
+// trimmed User-Agent before prefix comparison because the Codex family is not
+// case-stable ("Codex Desktop/" and "codex-tui/" both ship in the wild). The
+// entries are full client identifiers ending in "/", so the gate remains an
+// explicit allowlist: a User-Agent that merely contains "codex" does not pass.
+// t3code_desktop is a third-party Codex-driver client but sends the same
+// multi-agent payload shape.
+var codexMultiAgentClientPrefixes = []string{
+	"codex desktop/",
+	"codex-tui/",
+	"codex_exec/",
+	"codex_chatgpt_ios_remote/",
+	"t3code_desktop/",
+}
+
 func isCodexMultiAgentClient(userAgent string) bool {
-	userAgent = strings.TrimSpace(userAgent)
-	return strings.HasPrefix(userAgent, "Codex Desktop/") || strings.HasPrefix(userAgent, "codex-tui/")
+	userAgent = strings.ToLower(strings.TrimSpace(userAgent))
+	for _, prefix := range codexMultiAgentClientPrefixes {
+		if strings.HasPrefix(userAgent, prefix) {
+			return true
+		}
+	}
+	return false
 }
 
 func codexSpawnAgentModelsForRequest(ctx context.Context, headers http.Header, homeEnabled bool) []codexSpawnAgentModel {
