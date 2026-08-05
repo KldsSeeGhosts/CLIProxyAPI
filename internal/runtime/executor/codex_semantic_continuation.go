@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"net/http"
+	"regexp"
 	"strings"
 
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/config"
@@ -27,6 +28,15 @@ var codexContinuationAnnouncementVerbs = []string{
 }
 
 var codexContinuationAnnouncementSuffixes = []string{":", "：", "—", "–", "-", "…", "..."}
+
+// Strong suffixes mark prose that trails off expecting immediate follow-through.
+// A bare strong suffix is still not enough ("Here are the results:" stays a
+// legitimate ending), but when the trailing clause also narrates an in-flight
+// action ("Committing X:", "Running the parent gate...") the turn stalled
+// mid-intent even though no whitelisted tool verb appears in the prose.
+var codexContinuationStrongSuffixes = []string{":", "："}
+
+var codexContinuationTrailingActionPattern = regexp.MustCompile(`\b[a-z]+ing\b`)
 
 type codexContinuationBoundary uint8
 
@@ -201,6 +211,13 @@ func codexContinuationAnnouncementLike(text string, toolNames ...[]string) bool 
 	if !suffixed {
 		return false
 	}
+	strongSuffix := false
+	for _, suffix := range codexContinuationStrongSuffixes {
+		if strings.HasSuffix(text, suffix) {
+			strongSuffix = true
+			break
+		}
+	}
 	lower := strings.ToLower(text)
 	for _, verb := range codexContinuationAnnouncementVerbs {
 		if strings.Contains(lower, verb) {
@@ -214,7 +231,21 @@ func codexContinuationAnnouncementLike(text string, toolNames ...[]string) bool 
 			}
 		}
 	}
+	if strongSuffix {
+		return codexContinuationTrailingActionPattern.MatchString(codexContinuationTrailingClause(lower))
+	}
 	return false
+}
+
+// codexContinuationTrailingClause returns the text after the last sentence
+// terminator so participle detection judges only the trailing announcement,
+// not earlier prose in the same message.
+func codexContinuationTrailingClause(lower string) string {
+	idx := strings.LastIndexAny(lower, ".!?\n")
+	if idx < 0 {
+		return lower
+	}
+	return lower[idx+1:]
 }
 
 type codexContinuationController struct {
