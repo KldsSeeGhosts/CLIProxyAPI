@@ -108,9 +108,12 @@ func ConvertOpenAIResponsesRequestToOpenAIChatCompletions(modelName string, inpu
 			assistantMessage, _ = sjson.SetBytes(assistantMessage, "tool_calls", pendingToolCalls)
 			if reasoningContent != "" {
 				assistantMessage, _ = sjson.SetBytes(assistantMessage, "reasoning_content", reasoningContent)
+				// Responses replay can emit another assistant tool-call after its
+				// tool output without a new reasoning item. Keep this value until a
+				// non-assistant turn explicitly clears it.
+				lastAssistantReasoningContent = reasoningContent
 			}
 			appendMessage(assistantMessage)
-			lastAssistantReasoningContent = ""
 			for _, id := range pendingToolCallIDs {
 				if strings.TrimSpace(id) == "" {
 					continue
@@ -210,13 +213,20 @@ func ConvertOpenAIResponsesRequestToOpenAIChatCompletions(modelName string, inpu
 					reasoningContent := item.Get("reasoning_content").String()
 					if reasoningContent == "" {
 						reasoningContent = takePendingReasoningContent()
-					} else {
+					}
+					if reasoningContent == "" && isDeepSeekModel(modelName) {
+						// Codex can replay an assistant summary after a tool output
+						// without a new reasoning item. DeepSeek still requires the
+						// preceding reasoning_content on that assistant turn.
+						reasoningContent = lastAssistantReasoningContent
+					}
+					if item.Get("reasoning_content").String() != "" {
 						pendingReasoningContent = ""
 					}
 					if reasoningContent != "" {
 						message, _ = sjson.SetBytes(message, "reasoning_content", reasoningContent)
+						lastAssistantReasoningContent = reasoningContent
 					}
-					lastAssistantReasoningContent = reasoningContent
 				}
 
 				appendRegularMessage(message)
@@ -274,7 +284,6 @@ func ConvertOpenAIResponsesRequestToOpenAIChatCompletions(modelName string, inpu
 				if len(awaitingToolOutputs) == 0 && len(deferredMessages) > 0 {
 					flushDeferredMessages()
 				}
-				lastAssistantReasoningContent = ""
 
 			case "custom_tool_call":
 				// Codex freeform tool call replay: wrap the raw input so it
@@ -302,7 +311,6 @@ func ConvertOpenAIResponsesRequestToOpenAIChatCompletions(modelName string, inpu
 				if len(awaitingToolOutputs) == 0 && len(deferredMessages) > 0 {
 					flushDeferredMessages()
 				}
-				lastAssistantReasoningContent = ""
 			}
 
 		}
