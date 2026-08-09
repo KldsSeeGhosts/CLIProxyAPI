@@ -143,6 +143,25 @@ func TestCodexContinuationPassInstruction(t *testing.T) {
 			wantOK:       false,
 		},
 		{
+			name: "narrated let me write without call",
+			lines: []string{
+				`data: {"choices":[{"index":0,"delta":{"content":"Found the issue. Let me write an authoritative reconstructed manifest and do a final integrity check:"}}]}`,
+				`data: {"choices":[{"index":0,"delta":{},"finish_reason":"stop"}]}`,
+			},
+			toolsOffered: true,
+			wantOK:       true,
+			wantInstr:    codexContinuationAnnouncedCallInstruction,
+		},
+		{
+			name: "let me know remains complete",
+			lines: []string{
+				`data: {"choices":[{"index":0,"delta":{"content":"Let me know if you want a longer report:"}}]}`,
+				`data: {"choices":[{"index":0,"delta":{},"finish_reason":"stop"}]}`,
+			},
+			toolsOffered: true,
+			wantOK:       false,
+		},
+		{
 			name: "earlier participle with clean ending stays complete",
 			lines: []string{
 				`data: {"choices":[{"index":0,"delta":{"content":"The suite is running. All checks pass:"}}]}`,

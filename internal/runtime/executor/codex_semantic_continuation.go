@@ -38,6 +38,11 @@ var codexContinuationStrongSuffixes = []string{":", "："}
 
 var codexContinuationTrailingActionPattern = regexp.MustCompile(`\b[a-z]+ing\b`)
 
+// A tool-enabled turn that ends on an explicit "Let me <action>:" promise is
+// also unfinished. Keep the action list deliberately narrow so ordinary
+// closers such as "Let me know:" remain terminal answers.
+var codexContinuationTrailingLetMeActionPattern = regexp.MustCompile(`\blet me\s+(?:write|run|inspect|check|execute|verify|create|update|record|remove|install|build|test|search|read|review|open|close|restart|deploy|commit|push|submit)\b`)
+
 type codexContinuationBoundary uint8
 
 const (
@@ -232,7 +237,8 @@ func codexContinuationAnnouncementLike(text string, toolNames ...[]string) bool 
 		}
 	}
 	if strongSuffix {
-		return codexContinuationTrailingActionPattern.MatchString(codexContinuationTrailingClause(lower))
+		trailing := codexContinuationTrailingClause(lower)
+		return codexContinuationTrailingActionPattern.MatchString(trailing) || codexContinuationTrailingLetMeActionPattern.MatchString(trailing)
 	}
 	return false
 }
