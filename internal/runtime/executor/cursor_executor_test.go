@@ -8,6 +8,7 @@ import (
 	"strings"
 	"testing"
 
+	cursorproto "github.com/router-for-me/CLIProxyAPI/v7/internal/auth/cursor/proto"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/runtime/executor/helps"
 	cliproxyexecutor "github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/executor"
 )
@@ -37,6 +38,16 @@ func TestCursorSessionIDUsesCodexExecutionMetadata(t *testing.T) {
 	got := cursorSessionID(context.Background(), cliproxyexecutor.Request{}, opts)
 	want := helps.ProviderSessionUUID(cursorAuthType, opts.Metadata)
 	if got == "" || got != want {
+		t.Fatalf("cursorSessionID() = %q, want %q", got, want)
+	}
+}
+
+func TestCursorSessionIDUsesGenericSessionAffinityHeader(t *testing.T) {
+	want := "pi-session-123"
+	opts := cliproxyexecutor.Options{
+		Headers: map[string][]string{"X-Session-Affinity": {want}},
+	}
+	if got := cursorSessionID(context.Background(), cliproxyexecutor.Request{}, opts); got != want {
 		t.Fatalf("cursorSessionID() = %q, want %q", got, want)
 	}
 }
@@ -129,6 +140,45 @@ func TestCursorToolCallDeltaJSONEscapesCursorIdentifiers(t *testing.T) {
 	}
 	if got := decoded.ToolCalls[0].Function.Arguments; got != exec.Args {
 		t.Fatalf("tool arguments = %q, want %q", got, exec.Args)
+	}
+}
+
+func TestPendingCursorShellExecBridgesToBash(t *testing.T) {
+	exec := pendingCursorShellExec(&cursorproto.DecodedServerMessage{
+		ExecMsgId:        42,
+		ExecId:           "shell-exec",
+		Command:          "printf SHELL_OK",
+		WorkingDirectory: "/tmp",
+	}, true)
+
+	if exec.ToolName != "bash" || !exec.NativeShell {
+		t.Fatalf("tool = %q nativeShell=%t, want bash native shell", exec.ToolName, exec.NativeShell)
+	}
+	if !exec.NativeShellStream {
+		t.Fatal("native shell stream was not preserved")
+	}
+	if exec.ToolCallId == "" {
+		t.Fatal("tool call ID is empty")
+	}
+	if exec.Command != "printf SHELL_OK" || exec.WorkingDirectory != "/tmp" {
+		t.Fatalf("shell metadata = command %q cwd %q", exec.Command, exec.WorkingDirectory)
+	}
+	var args map[string]string
+	if err := json.Unmarshal([]byte(exec.Args), &args); err != nil {
+		t.Fatalf("unmarshal shell args: %v", err)
+	}
+	if got := args["command"]; got != "printf SHELL_OK" {
+		t.Fatalf("command = %q, want printf SHELL_OK", got)
+	}
+}
+
+func TestCursorHasTool(t *testing.T) {
+	tools := []cursorproto.McpToolDef{{Name: "read"}, {Name: "bash"}}
+	if !cursorHasTool(tools, "bash") {
+		t.Fatal("bash tool was not found")
+	}
+	if cursorHasTool(tools, "write") {
+		t.Fatal("unexpected write tool match")
 	}
 }
 

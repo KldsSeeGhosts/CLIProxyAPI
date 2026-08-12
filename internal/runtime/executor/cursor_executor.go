@@ -28,6 +28,7 @@ import (
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/runtime/executor/helps"
 	cliproxyauth "github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/auth"
 	cliproxyexecutor "github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/executor"
+	cliproxysession "github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/session"
 	sdktranslator "github.com/router-for-me/CLIProxyAPI/v7/sdk/translator"
 	log "github.com/sirupsen/logrus"
 	"github.com/tidwall/gjson"
@@ -90,11 +91,15 @@ type cursorSession struct {
 }
 
 type pendingMcpExec struct {
-	ExecMsgId  uint32
-	ExecId     string
-	ToolCallId string
-	ToolName   string
-	Args       string // JSON-encoded args
+	ExecMsgId         uint32
+	ExecId            string
+	ToolCallId        string
+	ToolName          string
+	Args              string // JSON-encoded args
+	NativeShell       bool
+	NativeShellStream bool
+	Command           string
+	WorkingDirectory  string
 }
 
 // NewCursorExecutor constructs a new executor instance.
@@ -657,7 +662,7 @@ func (e *CursorExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.A
 
 				// Create new resume output channel, reuse the same toolResultCh
 				resumeOut := make(chan cliproxyexecutor.StreamChunk, 64)
-				log.Debugf("cursor: saving session %s for MCP tool resume (tool=%s)", sessionKey, exec.ToolName)
+				log.Debugf("cursor: saving session %s for tool resume (tool=%s nativeShell=%t)", sessionKey, exec.ToolName, exec.NativeShell)
 				e.mu.Lock()
 				e.sessions[sessionKey] = &cursorSession{
 					stream:       stream,
@@ -935,7 +940,7 @@ func processH2SessionFrames(
 	blobStore map[string][]byte,
 	mcpTools []cursorproto.McpToolDef,
 	onText func(text string, isThinking bool),
-	onMcpExec func(exec pendingMcpExec),
+	onToolExec func(exec pendingMcpExec),
 	toolResultCh <-chan []toolResultInfo, // nil for no tool result injection; non-nil to wait for results
 	tokenUsage *cursorTokenUsage, // tracks accumulated token usage (may be nil)
 	onCheckpoint func(data []byte), // called when server sends conversation_checkpoint_update
@@ -1047,7 +1052,7 @@ func processH2SessionFrames(
 					stream.Write(cursorproto.FrameConnectMessage(resp, 0))
 
 				case cursorproto.ServerMsgExecMcpArgs:
-					if onMcpExec != nil {
+					if onToolExec != nil {
 						decodedArgs := decodeMcpArgsToJSON(msg.McpArgs)
 						toolCallId := msg.McpToolCallId
 						if toolCallId == "" {
@@ -1062,74 +1067,15 @@ func processH2SessionFrames(
 							ToolName:   msg.McpToolName,
 							Args:       decodedArgs,
 						}
-						onMcpExec(pending)
+						onToolExec(pending)
 
 						if toolResultCh == nil {
 							return nil
 						}
 
-						// Inline mode: wait for tool result while handling KV/heartbeat
-						log.Debugf("cursor: waiting for tool result on channel (inline mode)...")
-						var toolResults []toolResultInfo
-					waitLoop:
-						for {
-							select {
-							case <-ctx.Done():
-								return ctx.Err()
-							case results, ok := <-toolResultCh:
-								if !ok {
-									return nil
-								}
-								toolResults = results
-								break waitLoop
-							case waitData, ok := <-stream.Data():
-								if !ok {
-									return stream.Err()
-								}
-								buf.Write(waitData)
-								for {
-									cb := buf.Bytes()
-									if len(cb) == 0 {
-										break
-									}
-									wf, wp, wc, wok := cursorproto.ParseConnectFrame(cb)
-									if !wok {
-										break
-									}
-									buf.Next(wc)
-									if wf&cursorproto.ConnectEndStreamFlag != 0 {
-										continue
-									}
-									wmsg, werr := cursorproto.DecodeAgentServerMessage(wp)
-									if werr != nil {
-										continue
-									}
-									switch wmsg.Type {
-									case cursorproto.ServerMsgKvGetBlob:
-										blobKey := cursorproto.BlobIdHex(wmsg.BlobId)
-										d := blobStore[blobKey]
-										stream.Write(cursorproto.FrameConnectMessage(cursorproto.EncodeKvGetBlobResult(wmsg.KvId, d), 0))
-									case cursorproto.ServerMsgKvSetBlob:
-										blobKey := cursorproto.BlobIdHex(wmsg.BlobId)
-										blobStore[blobKey] = append([]byte(nil), wmsg.BlobData...)
-										stream.Write(cursorproto.FrameConnectMessage(cursorproto.EncodeKvSetBlobResult(wmsg.KvId), 0))
-									case cursorproto.ServerMsgExecRequestCtx:
-										stream.Write(cursorproto.FrameConnectMessage(cursorproto.EncodeExecRequestContextResult(wmsg.ExecMsgId, wmsg.ExecId, mcpTools), 0))
-									case cursorproto.ServerMsgCheckpoint:
-										if onCheckpoint != nil && len(wmsg.CheckpointData) > 0 {
-											onCheckpoint(wmsg.CheckpointData)
-										}
-									case cursorproto.ServerMsgInteractionQuery:
-										if err := stream.Write(cursorproto.FrameConnectMessage(
-											cursorproto.EncodeInteractionResponse(wmsg.InteractionQueryID, wmsg.InteractionQueryKind), 0,
-										)); err != nil {
-											return fmt.Errorf("cursor: reply to interaction query: %w", err)
-										}
-									}
-								}
-							case <-stream.Done():
-								return stream.Err()
-							}
+						toolResults, err := waitForCursorToolResults(ctx, stream, &buf, blobStore, mcpTools, toolResultCh, onCheckpoint)
+						if err != nil {
+							return err
 						}
 
 						// Send MCP result
@@ -1144,6 +1090,42 @@ func processH2SessionFrames(
 						continue
 					}
 
+				case cursorproto.ServerMsgExecShellArgs, cursorproto.ServerMsgExecShellStream:
+					if onToolExec == nil || !cursorHasTool(mcpTools, "bash") {
+						stream.Write(cursorproto.FrameConnectMessage(cursorproto.EncodeExecShellRejected(msg.ExecMsgId, msg.ExecId, msg.Command, msg.WorkingDirectory, rejectReason), 0))
+						continue
+					}
+
+					pending := pendingCursorShellExec(msg, msg.Type == cursorproto.ServerMsgExecShellStream)
+					log.Debugf("cursor: bridging native shell request to bash tool: execMsgId=%d execId=%q command=%q", msg.ExecMsgId, msg.ExecId, msg.Command)
+					onToolExec(pending)
+					if toolResultCh == nil {
+						return nil
+					}
+
+					toolResults, err := waitForCursorToolResults(ctx, stream, &buf, blobStore, mcpTools, toolResultCh, onCheckpoint)
+					if err != nil {
+						return err
+					}
+					for _, tr := range toolResults {
+						if tr.ToolCallId == pending.ToolCallId {
+							log.Debugf("cursor: sending inline native shell result for command=%q", pending.Command)
+							if pending.NativeShellStream {
+								stream.Write(cursorproto.FrameConnectMessage(cursorproto.EncodeExecShellStreamStart(pending.ExecMsgId, pending.ExecId), 0))
+								if tr.Content != "" {
+									stream.Write(cursorproto.FrameConnectMessage(cursorproto.EncodeExecShellStreamStdout(pending.ExecMsgId, pending.ExecId, tr.Content), 0))
+								}
+								stream.Write(cursorproto.FrameConnectMessage(cursorproto.EncodeExecShellStreamExit(pending.ExecMsgId, pending.ExecId, 0, pending.WorkingDirectory), 0))
+								stream.Write(cursorproto.FrameConnectMessage(cursorproto.EncodeExecClientStreamClose(pending.ExecMsgId), 0))
+							} else {
+								resultBytes := cursorproto.EncodeExecShellSuccess(pending.ExecMsgId, pending.ExecId, pending.Command, pending.WorkingDirectory, tr.Content, "", 0)
+								stream.Write(cursorproto.FrameConnectMessage(resultBytes, 0))
+							}
+							break
+						}
+					}
+					continue
+
 				case cursorproto.ServerMsgExecReadArgs:
 					stream.Write(cursorproto.FrameConnectMessage(cursorproto.EncodeExecReadRejected(msg.ExecMsgId, msg.ExecId, msg.Path, rejectReason), 0))
 				case cursorproto.ServerMsgExecWriteArgs:
@@ -1154,8 +1136,6 @@ func processH2SessionFrames(
 					stream.Write(cursorproto.FrameConnectMessage(cursorproto.EncodeExecLsRejected(msg.ExecMsgId, msg.ExecId, msg.Path, rejectReason), 0))
 				case cursorproto.ServerMsgExecGrepArgs:
 					stream.Write(cursorproto.FrameConnectMessage(cursorproto.EncodeExecGrepError(msg.ExecMsgId, msg.ExecId, rejectReason), 0))
-				case cursorproto.ServerMsgExecShellArgs, cursorproto.ServerMsgExecShellStream:
-					stream.Write(cursorproto.FrameConnectMessage(cursorproto.EncodeExecShellRejected(msg.ExecMsgId, msg.ExecId, msg.Command, msg.WorkingDirectory, rejectReason), 0))
 				case cursorproto.ServerMsgExecBgShellSpawn:
 					stream.Write(cursorproto.FrameConnectMessage(cursorproto.EncodeExecBackgroundShellSpawnRejected(msg.ExecMsgId, msg.ExecId, msg.Command, msg.WorkingDirectory, rejectReason), 0))
 				case cursorproto.ServerMsgExecFetchArgs:
@@ -1170,6 +1150,99 @@ func processH2SessionFrames(
 		case <-stream.Done():
 			log.Debugf("cursor: processH2SessionFrames exiting: stream done")
 			return stream.Err()
+		}
+	}
+}
+
+func pendingCursorShellExec(msg *cursorproto.DecodedServerMessage, stream bool) pendingMcpExec {
+	args, _ := json.Marshal(map[string]string{"command": msg.Command})
+	return pendingMcpExec{
+		ExecMsgId:         msg.ExecMsgId,
+		ExecId:            msg.ExecId,
+		ToolCallId:        uuid.New().String(),
+		ToolName:          "bash",
+		Args:              string(args),
+		NativeShell:       true,
+		NativeShellStream: stream,
+		Command:           msg.Command,
+		WorkingDirectory:  msg.WorkingDirectory,
+	}
+}
+
+func cursorHasTool(tools []cursorproto.McpToolDef, name string) bool {
+	for _, tool := range tools {
+		if tool.Name == name {
+			return true
+		}
+	}
+	return false
+}
+
+func waitForCursorToolResults(
+	ctx context.Context,
+	stream *cursorproto.H2Stream,
+	buf *bytes.Buffer,
+	blobStore map[string][]byte,
+	mcpTools []cursorproto.McpToolDef,
+	toolResultCh <-chan []toolResultInfo,
+	onCheckpoint func(data []byte),
+) ([]toolResultInfo, error) {
+	log.Debugf("cursor: waiting for tool result on channel (inline mode)...")
+	for {
+		select {
+		case <-ctx.Done():
+			return nil, ctx.Err()
+		case results, ok := <-toolResultCh:
+			if !ok {
+				return nil, nil
+			}
+			return results, nil
+		case waitData, ok := <-stream.Data():
+			if !ok {
+				return nil, stream.Err()
+			}
+			buf.Write(waitData)
+			for {
+				current := buf.Bytes()
+				if len(current) == 0 {
+					break
+				}
+				flags, payload, consumed, complete := cursorproto.ParseConnectFrame(current)
+				if !complete {
+					break
+				}
+				buf.Next(consumed)
+				if flags&cursorproto.ConnectEndStreamFlag != 0 {
+					continue
+				}
+				msg, err := cursorproto.DecodeAgentServerMessage(payload)
+				if err != nil {
+					continue
+				}
+				switch msg.Type {
+				case cursorproto.ServerMsgKvGetBlob:
+					blobKey := cursorproto.BlobIdHex(msg.BlobId)
+					stream.Write(cursorproto.FrameConnectMessage(cursorproto.EncodeKvGetBlobResult(msg.KvId, blobStore[blobKey]), 0))
+				case cursorproto.ServerMsgKvSetBlob:
+					blobKey := cursorproto.BlobIdHex(msg.BlobId)
+					blobStore[blobKey] = append([]byte(nil), msg.BlobData...)
+					stream.Write(cursorproto.FrameConnectMessage(cursorproto.EncodeKvSetBlobResult(msg.KvId), 0))
+				case cursorproto.ServerMsgExecRequestCtx:
+					stream.Write(cursorproto.FrameConnectMessage(cursorproto.EncodeExecRequestContextResult(msg.ExecMsgId, msg.ExecId, mcpTools), 0))
+				case cursorproto.ServerMsgCheckpoint:
+					if onCheckpoint != nil && len(msg.CheckpointData) > 0 {
+						onCheckpoint(msg.CheckpointData)
+					}
+				case cursorproto.ServerMsgInteractionQuery:
+					if err := stream.Write(cursorproto.FrameConnectMessage(
+						cursorproto.EncodeInteractionResponse(msg.InteractionQueryID, msg.InteractionQueryKind), 0,
+					)); err != nil {
+						return nil, fmt.Errorf("cursor: reply to interaction query: %w", err)
+					}
+				}
+			}
+		case <-stream.Done():
+			return nil, stream.Err()
 		}
 	}
 }
@@ -1670,7 +1743,36 @@ func cursorSessionID(ctx context.Context, req cliproxyexecutor.Request, opts cli
 			return sessionID
 		}
 	}
+	if sessionID := cursorExplicitSessionID(opts.Headers, opts.OriginalRequest, req.Payload); sessionID != "" {
+		return sessionID
+	}
 	return helps.ProviderSessionUUID(cursorAuthType, opts.Metadata, req.Metadata)
+}
+
+func cursorExplicitSessionID(headers map[string][]string, payloads ...[]byte) string {
+	for _, name := range []string{"X-Session-Affinity", "X-Session-ID", "Session-Id", "Session_id", "X-Client-Request-Id"} {
+		for key, values := range headers {
+			if !strings.EqualFold(key, name) {
+				continue
+			}
+			for _, value := range values {
+				if sessionID := cliproxysession.NormalizeExplicitID(value); sessionID != "" {
+					return sessionID
+				}
+			}
+		}
+	}
+	for _, payload := range payloads {
+		if len(payload) == 0 {
+			continue
+		}
+		for _, path := range []string{"session_id", "sessionId", "conversation_id", "prompt_cache_key"} {
+			if sessionID := cliproxysession.NormalizeExplicitID(gjson.GetBytes(payload, path).String()); sessionID != "" {
+				return sessionID
+			}
+		}
+	}
+	return ""
 }
 
 func resolveCursorDynamicModel(model string, payload []byte) string {

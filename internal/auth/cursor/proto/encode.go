@@ -75,6 +75,10 @@ func setUint32(msg *dynamicpb.Message, name string, val uint32) {
 	msg.Set(field(msg, name), protoreflect.ValueOfUint32(val))
 }
 
+func setInt32(msg *dynamicpb.Message, name string, val int32) {
+	msg.Set(field(msg, name), protoreflect.ValueOfInt32(val))
+}
+
 func setBool(msg *dynamicpb.Message, name string, val bool) {
 	msg.Set(field(msg, name), protoreflect.ValueOfBool(val))
 }
@@ -100,6 +104,18 @@ func EncodeHeartbeat() []byte {
 	acm := newMsg("AgentClientMessage")
 	setMsg(acm, "client_heartbeat", hb)
 	return marshal(acm)
+}
+
+// EncodeExecClientStreamClose marks a controlled streaming exec as complete.
+// Native Cursor sends this after the final shell_stream event.
+func EncodeExecClientStreamClose(execMsgId uint32) []byte {
+	closeMsg := newMsg("ExecClientStreamClose")
+	setUint32(closeMsg, "id", execMsgId)
+	control := newMsg("ExecClientControlMessage")
+	setMsg(control, "stream_close", closeMsg)
+	client := newMsg("AgentClientMessage")
+	setMsg(client, "exec_client_control_message", control)
+	return marshal(client)
 }
 
 const nonInteractiveInteractionReason = "CPA Cursor routing is non-interactive; continue without this action."
@@ -581,6 +597,46 @@ func EncodeExecShellRejected(execMsgId uint32, execId string, command, workDir, 
 	result := newMsg("ShellResult")
 	setMsg(result, "rejected", rej)
 	return encodeExecClientMsg(execMsgId, execId, "shell_result", result)
+}
+
+// EncodeExecShellSuccess responds to a native Cursor shell request after the
+// downstream client has executed it through its bash tool.
+func EncodeExecShellSuccess(execMsgId uint32, execId string, command, workDir, stdout, stderr string, exitCode int32) []byte {
+	success := newMsg("ShellSuccess")
+	setStr(success, "command", command)
+	setStr(success, "working_directory", workDir)
+	setInt32(success, "exit_code", exitCode)
+	setStr(success, "stdout", stdout)
+	setStr(success, "stderr", stderr)
+	setStr(success, "interleaved_output", stdout+stderr)
+
+	result := newMsg("ShellResult")
+	setMsg(result, "success", success)
+	return encodeExecClientMsg(execMsgId, execId, "shell_result", result)
+}
+
+func EncodeExecShellStreamStart(execMsgId uint32, execId string) []byte {
+	event := newMsg("ShellStreamStart")
+	result := newMsg("ShellStream")
+	setMsg(result, "start", event)
+	return encodeExecClientMsg(execMsgId, execId, "shell_stream", result)
+}
+
+func EncodeExecShellStreamStdout(execMsgId uint32, execId, data string) []byte {
+	event := newMsg("ShellStreamStdout")
+	setStr(event, "data", data)
+	result := newMsg("ShellStream")
+	setMsg(result, "stdout", event)
+	return encodeExecClientMsg(execMsgId, execId, "shell_stream", result)
+}
+
+func EncodeExecShellStreamExit(execMsgId uint32, execId string, code uint32, cwd string) []byte {
+	event := newMsg("ShellStreamExit")
+	setUint32(event, "code", code)
+	setStr(event, "cwd", cwd)
+	result := newMsg("ShellStream")
+	setMsg(result, "exit", event)
+	return encodeExecClientMsg(execMsgId, execId, "shell_stream", result)
 }
 
 func EncodeExecWriteRejected(execMsgId uint32, execId string, path, reason string) []byte {
