@@ -10,6 +10,7 @@ import (
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/util"
 	coreauth "github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/auth"
 	"github.com/router-for-me/CLIProxyAPI/v7/sdk/config"
+	log "github.com/sirupsen/logrus"
 )
 
 type openAICompatibilityRegistrationCache struct {
@@ -348,6 +349,13 @@ func (s *Service) registerResolvedModelsForAuth(a *coreauth.Auth, providerKey st
 		normalizedModels = append(normalizedModels, &clone)
 	}
 	if len(normalizedModels) == 0 {
+		if strings.EqualFold(providerKey, constant.Codex) && shouldRetainCodexLastKnownGood(a) {
+			if previous := retainLastKnownGoodModels(a.ID, nil); len(previous) > 0 {
+				log.Warnf("codex catalog refresh produced no models for %s; retaining last-known-good registration", a.ID)
+				GlobalModelRegistry().RegisterClient(a.ID, providerKey, previous)
+				return
+			}
+		}
 		GlobalModelRegistry().UnregisterClient(a.ID)
 		return
 	}
