@@ -329,6 +329,7 @@ func (e *CursorExecutor) Execute(ctx context.Context, auth *cliproxyauth.Auth, r
 	if accessToken == "" {
 		return resp, fmt.Errorf("cursor: access token not found")
 	}
+	req.Model = resolveCursorDynamicModel(req.Model, req.Payload)
 
 	// Translate input to OpenAI format if needed (e.g. Claude /v1/messages format)
 	from := opts.SourceFormat
@@ -339,7 +340,7 @@ func (e *CursorExecutor) Execute(ctx context.Context, auth *cliproxyauth.Auth, r
 	}
 
 	parsed := parseOpenAIRequest(payload)
-	ccSessId := helps.ExtractClaudeCodeSessionID(ctx, req.Payload, opts.Headers)
+	ccSessId := cursorSessionID(ctx, req, opts)
 	conversationId := deriveConversationId(helps.APIKeyFromContext(ctx), ccSessId, parsed.SystemPrompt)
 	params := buildRunRequestParams(parsed, conversationId)
 
@@ -413,12 +414,10 @@ func (e *CursorExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.A
 	if accessToken == "" {
 		return nil, fmt.Errorf("cursor: access token not found")
 	}
+	req.Model = resolveCursorDynamicModel(req.Model, req.Payload)
 
 	// Extract session_id from metadata BEFORE translation (translation strips metadata)
-	ccSessionId := helps.ExtractClaudeCodeSessionID(ctx, req.Payload, opts.Headers)
-	if ccSessionId == "" && len(opts.OriginalRequest) > 0 {
-		ccSessionId = helps.ExtractClaudeCodeSessionID(ctx, opts.OriginalRequest, opts.Headers)
-	}
+	ccSessionId := cursorSessionID(ctx, req, opts)
 
 	// Translate input to OpenAI format if needed
 	from := opts.SourceFormat
@@ -1657,6 +1656,41 @@ func deriveConversationId(apiKey, sessionId, systemPrompt string) string {
 	h := sha256.Sum256([]byte(input))
 	s := hex.EncodeToString(h[:16])
 	return fmt.Sprintf("%s-%s-%s-%s-%s", s[:8], s[8:12], s[12:16], s[16:20], s[20:32])
+}
+
+// cursorSessionID keeps Cursor's checkpoint and MCP-tool continuation state
+// stable for every supported harness. Claude Code carries its own session ID;
+// Codex CLI/Desktop expose the equivalent through executor metadata.
+func cursorSessionID(ctx context.Context, req cliproxyexecutor.Request, opts cliproxyexecutor.Options) string {
+	if sessionID := helps.ExtractClaudeCodeSessionID(ctx, req.Payload, opts.Headers); sessionID != "" {
+		return sessionID
+	}
+	if len(opts.OriginalRequest) > 0 {
+		if sessionID := helps.ExtractClaudeCodeSessionID(ctx, opts.OriginalRequest, opts.Headers); sessionID != "" {
+			return sessionID
+		}
+	}
+	return helps.ProviderSessionUUID(cursorAuthType, opts.Metadata, req.Metadata)
+}
+
+func resolveCursorDynamicModel(model string, payload []byte) string {
+	if model != "cursor-grok-4.6" {
+		return model
+	}
+	effort := strings.ToLower(strings.TrimSpace(gjson.GetBytes(payload, "reasoning.effort").String()))
+	if effort == "" {
+		effort = strings.ToLower(strings.TrimSpace(gjson.GetBytes(payload, "reasoning_effort").String()))
+	}
+	switch effort {
+	case "low", "medium", "high", "xhigh":
+	default:
+		effort = "high"
+	}
+	fast := strings.EqualFold(strings.TrimSpace(gjson.GetBytes(payload, "service_tier").String()), "priority")
+	if fast {
+		return "cursor-grok-4.6-" + effort + "-fast"
+	}
+	return "cursor-grok-4.6-" + effort
 }
 
 func deriveSessionKey(clientKey string, model string, messages []gjson.Result) string {

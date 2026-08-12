@@ -1,12 +1,45 @@
 package executor
 
 import (
+	"context"
 	"encoding/json"
 	"errors"
 	"net/http"
 	"strings"
 	"testing"
+
+	"github.com/router-for-me/CLIProxyAPI/v7/internal/runtime/executor/helps"
+	cliproxyexecutor "github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/executor"
 )
+
+func TestResolveCursorDynamicModel(t *testing.T) {
+	tests := []struct {
+		name, model, payload, want string
+	}{
+		{"other model unchanged", "composer-2.5", `{"reasoning":{"effort":"low"}}`, "composer-2.5"},
+		{"responses medium", "cursor-grok-4.6", `{"reasoning":{"effort":"medium"}}`, "cursor-grok-4.6-medium"},
+		{"chat xhigh fast", "cursor-grok-4.6", `{"reasoning_effort":"xhigh","service_tier":"priority"}`, "cursor-grok-4.6-xhigh-fast"},
+		{"unsupported effort defaults high", "cursor-grok-4.6", `{"reasoning":{"effort":"max"}}`, "cursor-grok-4.6-high"},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			if got := resolveCursorDynamicModel(test.model, []byte(test.payload)); got != test.want {
+				t.Fatalf("resolveCursorDynamicModel() = %q, want %q", got, test.want)
+			}
+		})
+	}
+}
+
+func TestCursorSessionIDUsesCodexExecutionMetadata(t *testing.T) {
+	opts := cliproxyexecutor.Options{Metadata: map[string]any{
+		cliproxyexecutor.ExecutionSessionMetadataKey: "codex-session-1",
+	}}
+	got := cursorSessionID(context.Background(), cliproxyexecutor.Request{}, opts)
+	want := helps.ProviderSessionUUID(cursorAuthType, opts.Metadata)
+	if got == "" || got != want {
+		t.Fatalf("cursorSessionID() = %q, want %q", got, want)
+	}
+}
 
 func TestRequestScopedCursorErrorRetainsExplicitAuthAndQuotaFailures(t *testing.T) {
 	tests := []struct {
