@@ -319,18 +319,25 @@ func (h *Handler) AuthenticateManagementKey(clientIP string, localClient bool, p
 	}
 	envSecret := h.envSecret
 
+	// Loopback callers all share one IP, so one stale local client must not lock
+	// every local management client out of the operator's own gateway.
+	trackFailures := !localClient
+
 	now := time.Now()
 	h.attemptsMu.Lock()
 	ai := h.failedAttempts[clientIP]
 	if ai != nil && !ai.blockedUntil.IsZero() {
 		if now.Before(ai.blockedUntil) {
-			remaining := ai.blockedUntil.Sub(now).Round(time.Second)
-			h.attemptsMu.Unlock()
-			return false, http.StatusForbidden, fmt.Sprintf("IP banned due to too many failed attempts. Try again in %s", remaining)
+			if trackFailures {
+				remaining := ai.blockedUntil.Sub(now).Round(time.Second)
+				h.attemptsMu.Unlock()
+				return false, http.StatusForbidden, fmt.Sprintf("IP banned due to too many failed attempts. Try again in %s", remaining)
+			}
+		} else {
+			// Ban expired, reset state
+			ai.blockedUntil = time.Time{}
+			ai.count = 0
 		}
-		// Ban expired, reset state
-		ai.blockedUntil = time.Time{}
-		ai.count = 0
 	}
 	h.attemptsMu.Unlock()
 
@@ -339,6 +346,9 @@ func (h *Handler) AuthenticateManagementKey(clientIP string, localClient bool, p
 	}
 
 	fail := func() {
+		if !trackFailures {
+			return
+		}
 		h.attemptsMu.Lock()
 		aip := h.failedAttempts[clientIP]
 		if aip == nil {

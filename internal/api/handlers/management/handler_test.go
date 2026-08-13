@@ -5,13 +5,14 @@ import (
 	"net/http/httptest"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/gin-gonic/gin"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/config"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/pluginhost"
 )
 
-func TestAuthenticateManagementKey_LocalhostIPBan_BlocksCorrectKeyDuringBan(t *testing.T) {
+func TestAuthenticateManagementKey_LocalhostFailuresDoNotBanLoopback(t *testing.T) {
 	h := &Handler{
 		cfg:            &config.Config{},
 		failedAttempts: make(map[string]*attemptInfo),
@@ -29,6 +30,46 @@ func TestAuthenticateManagementKey_LocalhostIPBan_BlocksCorrectKeyDuringBan(t *t
 	}
 
 	allowed, statusCode, errMsg := h.AuthenticateManagementKey("127.0.0.1", true, "test-secret")
+	if !allowed || statusCode != 0 || errMsg != "" {
+		t.Fatalf("expected correct loopback key after failures: allowed=%v status=%d msg=%q", allowed, statusCode, errMsg)
+	}
+}
+
+func TestAuthenticateManagementKey_LocalhostIgnoresExistingIPBan(t *testing.T) {
+	h := &Handler{
+		cfg:            &config.Config{},
+		failedAttempts: make(map[string]*attemptInfo),
+		envSecret:      "test-secret",
+	}
+	h.failedAttempts["127.0.0.1"] = &attemptInfo{
+		blockedUntil: time.Now().Add(30 * time.Minute),
+	}
+
+	allowed, statusCode, errMsg := h.AuthenticateManagementKey("127.0.0.1", true, "test-secret")
+	if !allowed || statusCode != 0 || errMsg != "" {
+		t.Fatalf("expected loopback key to ignore leftover IP ban: allowed=%v status=%d msg=%q", allowed, statusCode, errMsg)
+	}
+}
+
+func TestAuthenticateManagementKey_RemoteIPBanBlocksCorrectKeyDuringBan(t *testing.T) {
+	h := &Handler{
+		cfg:                 &config.Config{},
+		failedAttempts:      make(map[string]*attemptInfo),
+		allowRemoteOverride: true,
+		envSecret:           "test-secret",
+	}
+
+	for i := 0; i < 5; i++ {
+		allowed, statusCode, errMsg := h.AuthenticateManagementKey("192.0.2.10", false, "wrong-secret")
+		if allowed {
+			t.Fatalf("expected auth to be denied at attempt %d", i+1)
+		}
+		if statusCode != http.StatusUnauthorized || errMsg != "invalid management key" {
+			t.Fatalf("unexpected auth failure at attempt %d: status=%d msg=%q", i+1, statusCode, errMsg)
+		}
+	}
+
+	allowed, statusCode, errMsg := h.AuthenticateManagementKey("192.0.2.10", false, "test-secret")
 	if allowed {
 		t.Fatalf("expected correct key to be denied while banned")
 	}
