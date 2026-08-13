@@ -49,6 +49,11 @@ const (
 	cursorBootstrapRetryDelay  = 250 * time.Millisecond
 	cursorSessionTTL           = 5 * time.Minute
 	cursorCheckpointTTL        = 30 * time.Minute
+	// cursorToolCallBatchWindow bounds how long a turn waits for sibling exec
+	// requests before the tool-call response is closed. Cursor emits parallel
+	// tool calls as separate frames a few milliseconds apart, and every exec it
+	// opens must be answered or the H2 turn stalls.
+	cursorToolCallBatchWindow = 400 * time.Millisecond
 )
 
 // cursorClientVersionResolved is set at init from CURSOR_CLIENT_VERSION env if present.
@@ -347,7 +352,7 @@ func (e *CursorExecutor) Execute(ctx context.Context, auth *cliproxyauth.Auth, r
 	parsed := parseOpenAIRequest(payload)
 	ccSessId := cursorSessionID(ctx, req, opts)
 	conversationId := deriveConversationId(helps.APIKeyFromContext(ctx), ccSessId, parsed.SystemPrompt)
-	params := buildRunRequestParams(parsed, conversationId)
+	params := buildRunRequestParams(parsed, conversationId, req.Model)
 
 	requestBytes := cursorproto.EncodeRunRequest(params)
 	framedRequest := cursorproto.FrameConnectMessage(requestBytes, 0)
@@ -506,7 +511,7 @@ func (e *CursorExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.A
 	saved, hasCheckpoint := e.checkpoints[checkpointKey]
 	e.mu.Unlock()
 
-	params := buildRunRequestParams(parsed, conversationId)
+	params := buildRunRequestParams(parsed, conversationId, req.Model)
 
 	if hasCheckpoint && saved.data != nil && saved.authID == authID {
 		// Same auth — use checkpoint normally
@@ -530,7 +535,7 @@ func (e *CursorExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.A
 		e.mu.Unlock()
 		if len(parsed.ToolResults) > 0 || len(parsed.Turns) > 0 {
 			flattenConversationIntoUserText(parsed)
-			params = buildRunRequestParams(parsed, conversationId)
+			params = buildRunRequestParams(parsed, conversationId, req.Model)
 		}
 	} else if len(parsed.ToolResults) > 0 || len(parsed.Turns) > 0 {
 		// Fallback: no checkpoint available (cold resume / proxy restart).
@@ -538,7 +543,7 @@ func (e *CursorExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.A
 		// Cursor's turns encoding is not reliably read by the model, but userText always works.
 		log.Debugf("cursor: no checkpoint, flattening %d turns + %d tool results into userText", len(parsed.Turns), len(parsed.ToolResults))
 		flattenConversationIntoUserText(parsed)
-		params = buildRunRequestParams(parsed, conversationId)
+		params = buildRunRequestParams(parsed, conversationId, req.Model)
 	}
 	requestBytes := cursorproto.EncodeRunRequest(params)
 	framedRequest := cursorproto.FrameConnectMessage(requestBytes, 0)
@@ -645,10 +650,13 @@ func (e *CursorExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.A
 			func(text string, isThinking bool) {
 				sendChunkSwitchable(cursorTextDeltaJSON(text, isThinking), "")
 			},
-			func(exec pendingMcpExec) {
-				toolCallJSON := cursorToolCallDeltaJSON(toolCallIndex, exec)
-				toolCallIndex++
-				sendChunkSwitchable(toolCallJSON, "")
+			func(batch []pendingMcpExec) {
+				// Emit the whole parallel batch in one assistant message so the
+				// harness executes every tool and returns every result.
+				for _, exec := range batch {
+					sendChunkSwitchable(cursorToolCallDeltaJSON(toolCallIndex, exec), "")
+					toolCallIndex++
+				}
 				sendChunkSwitchable(`{}`, `"tool_calls"`)
 				sendDoneSwitchable()
 
@@ -662,13 +670,13 @@ func (e *CursorExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.A
 
 				// Create new resume output channel, reuse the same toolResultCh
 				resumeOut := make(chan cliproxyexecutor.StreamChunk, 64)
-				log.Debugf("cursor: saving session %s for tool resume (tool=%s nativeShell=%t)", sessionKey, exec.ToolName, exec.NativeShell)
+				log.Debugf("cursor: saving session %s for tool resume (%d tool call(s))", sessionKey, len(batch))
 				e.mu.Lock()
 				e.sessions[sessionKey] = &cursorSession{
 					stream:       stream,
 					blobStore:    params.BlobStore,
 					mcpTools:     params.McpTools,
-					pending:      []pendingMcpExec{exec},
+					pending:      batch,
 					cancel:       sessionCancel,
 					createdAt:    time.Now(),
 					authID:       authID,
@@ -940,7 +948,7 @@ func processH2SessionFrames(
 	blobStore map[string][]byte,
 	mcpTools []cursorproto.McpToolDef,
 	onText func(text string, isThinking bool),
-	onToolExec func(exec pendingMcpExec),
+	onToolExec func(batch []pendingMcpExec),
 	toolResultCh <-chan []toolResultInfo, // nil for no tool result injection; non-nil to wait for results
 	tokenUsage *cursorTokenUsage, // tracks accumulated token usage (may be nil)
 	onCheckpoint func(data []byte), // called when server sends conversation_checkpoint_update
@@ -1054,75 +1062,80 @@ func processH2SessionFrames(
 				case cursorproto.ServerMsgExecMcpArgs:
 					if onToolExec != nil {
 						decodedArgs := decodeMcpArgsToJSON(msg.McpArgs)
-						toolCallId := msg.McpToolCallId
+						toolCallId := sanitizeCursorToolCallID(msg.McpToolCallId)
 						if toolCallId == "" {
 							toolCallId = uuid.New().String()
 						}
 						log.Debugf("cursor: received mcpArgs from server: execMsgId=%d execId=%q toolName=%s toolCallId=%s",
 							msg.ExecMsgId, msg.ExecId, msg.McpToolName, toolCallId)
-						pending := pendingMcpExec{
+						pending := []pendingMcpExec{{
 							ExecMsgId:  msg.ExecMsgId,
 							ExecId:     msg.ExecId,
 							ToolCallId: toolCallId,
 							ToolName:   msg.McpToolName,
 							Args:       decodedArgs,
-						}
-						onToolExec(pending)
+						}}
 
 						if toolResultCh == nil {
+							onToolExec(pending)
 							return nil
 						}
 
-						toolResults, err := waitForCursorToolResults(ctx, stream, &buf, blobStore, mcpTools, toolResultCh, onCheckpoint)
+						// Cursor issues parallel tool calls as sibling exec frames a few
+						// milliseconds apart. Collect the whole batch before ending the
+						// response: every exec Cursor opens must be answered, otherwise
+						// the H2 turn stalls until the client times out.
+						batch, batchErr := collectCursorExecBatch(ctx, stream, &buf, blobStore, mcpTools, onCheckpoint, pending)
+						if batchErr != nil {
+							return batchErr
+						}
+						pending = batch
+						if len(pending) > 1 {
+							log.Debugf("cursor: collected %d parallel tool calls for this turn", len(pending))
+						}
+						onToolExec(pending)
+
+						toolResults, err := waitForCursorToolResults(ctx, stream, &buf, blobStore, mcpTools, toolResultCh, onCheckpoint, len(pending))
 						if err != nil {
 							return err
 						}
 
-						// Send MCP result
-						for _, tr := range toolResults {
-							if tr.ToolCallId == pending.ToolCallId {
-								log.Debugf("cursor: sending inline MCP result for tool=%s", pending.ToolName)
-								resultBytes := cursorproto.EncodeExecMcpResult(pending.ExecMsgId, pending.ExecId, tr.Content, false)
-								stream.Write(cursorproto.FrameConnectMessage(resultBytes, 0))
-								break
-							}
+						if err := sendCursorToolResults(stream, pending, toolResults); err != nil {
+							return err
 						}
 						continue
 					}
 
 				case cursorproto.ServerMsgExecShellArgs, cursorproto.ServerMsgExecShellStream:
-					if onToolExec == nil || !cursorHasTool(mcpTools, "bash") {
+					shellTool, ok := cursorShellBridgeTool(mcpTools)
+					if onToolExec == nil || !ok {
 						stream.Write(cursorproto.FrameConnectMessage(cursorproto.EncodeExecShellRejected(msg.ExecMsgId, msg.ExecId, msg.Command, msg.WorkingDirectory, rejectReason), 0))
 						continue
 					}
 
-					pending := pendingCursorShellExec(msg, msg.Type == cursorproto.ServerMsgExecShellStream)
-					log.Debugf("cursor: bridging native shell request to bash tool: execMsgId=%d execId=%q command=%q", msg.ExecMsgId, msg.ExecId, msg.Command)
-					onToolExec(pending)
+					pending := []pendingMcpExec{pendingCursorShellExec(msg, msg.Type == cursorproto.ServerMsgExecShellStream, shellTool)}
+					log.Debugf("cursor: bridging native shell request to %s tool: execMsgId=%d execId=%q command=%q", shellTool, msg.ExecMsgId, msg.ExecId, msg.Command)
 					if toolResultCh == nil {
+						onToolExec(pending)
 						return nil
 					}
 
-					toolResults, err := waitForCursorToolResults(ctx, stream, &buf, blobStore, mcpTools, toolResultCh, onCheckpoint)
+					shellBatch, shellBatchErr := collectCursorExecBatch(ctx, stream, &buf, blobStore, mcpTools, onCheckpoint, pending)
+					if shellBatchErr != nil {
+						return shellBatchErr
+					}
+					pending = shellBatch
+					if len(pending) > 1 {
+						log.Debugf("cursor: collected %d parallel tool calls for this turn", len(pending))
+					}
+					onToolExec(pending)
+
+					toolResults, err := waitForCursorToolResults(ctx, stream, &buf, blobStore, mcpTools, toolResultCh, onCheckpoint, len(pending))
 					if err != nil {
 						return err
 					}
-					for _, tr := range toolResults {
-						if tr.ToolCallId == pending.ToolCallId {
-							log.Debugf("cursor: sending inline native shell result for command=%q", pending.Command)
-							if pending.NativeShellStream {
-								stream.Write(cursorproto.FrameConnectMessage(cursorproto.EncodeExecShellStreamStart(pending.ExecMsgId, pending.ExecId), 0))
-								if tr.Content != "" {
-									stream.Write(cursorproto.FrameConnectMessage(cursorproto.EncodeExecShellStreamStdout(pending.ExecMsgId, pending.ExecId, tr.Content), 0))
-								}
-								stream.Write(cursorproto.FrameConnectMessage(cursorproto.EncodeExecShellStreamExit(pending.ExecMsgId, pending.ExecId, 0, pending.WorkingDirectory), 0))
-								stream.Write(cursorproto.FrameConnectMessage(cursorproto.EncodeExecClientStreamClose(pending.ExecMsgId), 0))
-							} else {
-								resultBytes := cursorproto.EncodeExecShellSuccess(pending.ExecMsgId, pending.ExecId, pending.Command, pending.WorkingDirectory, tr.Content, "", 0)
-								stream.Write(cursorproto.FrameConnectMessage(resultBytes, 0))
-							}
-							break
-						}
+					if err := sendCursorToolResults(stream, pending, toolResults); err != nil {
+						return err
 					}
 					continue
 
@@ -1154,14 +1167,16 @@ func processH2SessionFrames(
 	}
 }
 
-func pendingCursorShellExec(msg *cursorproto.DecodedServerMessage, stream bool) pendingMcpExec {
-	args, _ := json.Marshal(map[string]string{"command": msg.Command})
+func pendingCursorShellExec(msg *cursorproto.DecodedServerMessage, stream bool, toolName string) pendingMcpExec {
+	if toolName == "" {
+		toolName = "bash"
+	}
 	return pendingMcpExec{
 		ExecMsgId:         msg.ExecMsgId,
 		ExecId:            msg.ExecId,
 		ToolCallId:        uuid.New().String(),
-		ToolName:          "bash",
-		Args:              string(args),
+		ToolName:          toolName,
+		Args:              cursorShellToolArgs(toolName, msg.Command, msg.WorkingDirectory),
 		NativeShell:       true,
 		NativeShellStream: stream,
 		Command:           msg.Command,
@@ -1178,6 +1193,187 @@ func cursorHasTool(tools []cursorproto.McpToolDef, name string) bool {
 	return false
 }
 
+// cursorShellBridgeTool picks the client-offered tool that should receive a
+// Cursor native ExecShell request. Pi historically exposes `bash`; Codex
+// Responses exposes `shell`, `exec_command`, or custom `exec`. Prefer bash so
+// existing Chat Completions clients keep their original tool name.
+func cursorShellBridgeTool(tools []cursorproto.McpToolDef) (string, bool) {
+	for _, name := range []string{"bash", "shell", "exec_command", "exec", "local_shell"} {
+		if cursorHasTool(tools, name) {
+			return name, true
+		}
+	}
+	for _, tool := range tools {
+		lower := strings.ToLower(strings.TrimSpace(tool.Name))
+		if strings.HasSuffix(lower, "__exec") || strings.HasSuffix(lower, "__shell") || strings.HasSuffix(lower, "__exec_command") {
+			return tool.Name, true
+		}
+	}
+	return "", false
+}
+
+func cursorShellToolArgs(toolName, command, workDir string) string {
+	switch {
+	case toolName == "exec_command" || strings.HasSuffix(toolName, "__exec_command"):
+		payload := map[string]string{"cmd": command}
+		if workDir != "" {
+			payload["workdir"] = workDir
+		}
+		args, _ := json.Marshal(payload)
+		return string(args)
+	case toolName == "exec" || strings.HasSuffix(toolName, "__exec"):
+		input := "const r = await tools.exec_command({cmd:" + jsonString(command)
+		if workDir != "" {
+			input += ", workdir:" + jsonString(workDir)
+		}
+		input += "}); text(r.output);"
+		args, _ := json.Marshal(map[string]string{"input": input})
+		return string(args)
+	default:
+		payload := map[string]string{"command": command}
+		if workDir != "" && toolName != "bash" {
+			payload["workdir"] = workDir
+		}
+		args, _ := json.Marshal(payload)
+		return string(args)
+	}
+}
+
+// drainCursorSideChannel answers the bookkeeping messages Cursor interleaves
+// with a turn (blob KV, exec context, checkpoints, interaction queries) from
+// whatever is already buffered. When collect is non-nil, sibling exec requests
+// are appended to it instead of being dropped; otherwise an unexpected exec is
+// rejected so Cursor never waits on a result nobody will send.
+func drainCursorSideChannel(
+	stream *cursorproto.H2Stream,
+	buf *bytes.Buffer,
+	blobStore map[string][]byte,
+	mcpTools []cursorproto.McpToolDef,
+	onCheckpoint func(data []byte),
+	collect *[]pendingMcpExec,
+) error {
+	for {
+		current := buf.Bytes()
+		if len(current) == 0 {
+			return nil
+		}
+		flags, payload, consumed, complete := cursorproto.ParseConnectFrame(current)
+		if !complete {
+			return nil
+		}
+		buf.Next(consumed)
+		if flags&cursorproto.ConnectEndStreamFlag != 0 {
+			if err := cursorproto.ParseConnectEndStream(payload); err != nil {
+				return err
+			}
+			continue
+		}
+		msg, err := cursorproto.DecodeAgentServerMessage(payload)
+		if err != nil {
+			continue
+		}
+		switch msg.Type {
+		case cursorproto.ServerMsgKvGetBlob:
+			blobKey := cursorproto.BlobIdHex(msg.BlobId)
+			if err := stream.Write(cursorproto.FrameConnectMessage(cursorproto.EncodeKvGetBlobResult(msg.KvId, blobStore[blobKey]), 0)); err != nil {
+				return fmt.Errorf("cursor: reply to kv get blob: %w", err)
+			}
+		case cursorproto.ServerMsgKvSetBlob:
+			blobKey := cursorproto.BlobIdHex(msg.BlobId)
+			blobStore[blobKey] = append([]byte(nil), msg.BlobData...)
+			if err := stream.Write(cursorproto.FrameConnectMessage(cursorproto.EncodeKvSetBlobResult(msg.KvId), 0)); err != nil {
+				return fmt.Errorf("cursor: reply to kv set blob: %w", err)
+			}
+		case cursorproto.ServerMsgExecRequestCtx:
+			if err := stream.Write(cursorproto.FrameConnectMessage(cursorproto.EncodeExecRequestContextResult(msg.ExecMsgId, msg.ExecId, mcpTools), 0)); err != nil {
+				return fmt.Errorf("cursor: reply to exec request context: %w", err)
+			}
+		case cursorproto.ServerMsgCheckpoint:
+			if onCheckpoint != nil && len(msg.CheckpointData) > 0 {
+				onCheckpoint(msg.CheckpointData)
+			}
+		case cursorproto.ServerMsgInteractionQuery:
+			if err := stream.Write(cursorproto.FrameConnectMessage(
+				cursorproto.EncodeInteractionResponse(msg.InteractionQueryID, msg.InteractionQueryKind), 0,
+			)); err != nil {
+				return fmt.Errorf("cursor: reply to interaction query: %w", err)
+			}
+		case cursorproto.ServerMsgExecMcpArgs:
+			exec := pendingMcpExec{
+				ExecMsgId:  msg.ExecMsgId,
+				ExecId:     msg.ExecId,
+				ToolCallId: sanitizeCursorToolCallID(msg.McpToolCallId),
+				ToolName:   msg.McpToolName,
+				Args:       decodeMcpArgsToJSON(msg.McpArgs),
+			}
+			if exec.ToolCallId == "" {
+				exec.ToolCallId = uuid.New().String()
+			}
+			if collect != nil {
+				log.Debugf("cursor: received sibling mcpArgs: execMsgId=%d toolName=%s toolCallId=%s", exec.ExecMsgId, exec.ToolName, exec.ToolCallId)
+				*collect = append(*collect, exec)
+				continue
+			}
+			log.Warnf("cursor: unexpected mcpArgs for tool=%s while awaiting results; rejecting to keep the turn alive", exec.ToolName)
+			if err := stream.Write(cursorproto.FrameConnectMessage(
+				cursorproto.EncodeExecMcpError(exec.ExecMsgId, exec.ExecId, "tool call could not be dispatched to the client"), 0,
+			)); err != nil {
+				return fmt.Errorf("cursor: reject unexpected mcp args: %w", err)
+			}
+		case cursorproto.ServerMsgExecShellArgs, cursorproto.ServerMsgExecShellStream:
+			shellTool, ok := cursorShellBridgeTool(mcpTools)
+			if collect != nil && ok {
+				exec := pendingCursorShellExec(msg, msg.Type == cursorproto.ServerMsgExecShellStream, shellTool)
+				log.Debugf("cursor: received sibling shell exec: execMsgId=%d command=%q", exec.ExecMsgId, exec.Command)
+				*collect = append(*collect, exec)
+				continue
+			}
+			if err := stream.Write(cursorproto.FrameConnectMessage(
+				cursorproto.EncodeExecShellRejected(msg.ExecMsgId, msg.ExecId, msg.Command, msg.WorkingDirectory, "tool call could not be dispatched to the client"), 0,
+			)); err != nil {
+				return fmt.Errorf("cursor: reject unexpected shell args: %w", err)
+			}
+		}
+	}
+}
+
+// collectCursorExecBatch gathers the sibling exec requests belonging to the
+// same parallel tool-call batch. It returns as soon as the batch goes quiet so
+// a single tool call is not penalised with the full window.
+func collectCursorExecBatch(
+	ctx context.Context,
+	stream *cursorproto.H2Stream,
+	buf *bytes.Buffer,
+	blobStore map[string][]byte,
+	mcpTools []cursorproto.McpToolDef,
+	onCheckpoint func(data []byte),
+	pending []pendingMcpExec,
+) ([]pendingMcpExec, error) {
+	if err := drainCursorSideChannel(stream, buf, blobStore, mcpTools, onCheckpoint, &pending); err != nil {
+		return pending, err
+	}
+	timer := time.NewTimer(cursorToolCallBatchWindow)
+	defer timer.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			return pending, ctx.Err()
+		case <-timer.C:
+			return pending, nil
+		case <-stream.Done():
+			return pending, nil
+		case data, ok := <-stream.Data():
+			if !ok {
+				return pending, nil
+			}
+			buf.Write(data)
+			if err := drainCursorSideChannel(stream, buf, blobStore, mcpTools, onCheckpoint, &pending); err != nil {
+				return pending, err
+			}
+		}
+	}
+}
+
 func waitForCursorToolResults(
 	ctx context.Context,
 	stream *cursorproto.H2Stream,
@@ -1186,60 +1382,35 @@ func waitForCursorToolResults(
 	mcpTools []cursorproto.McpToolDef,
 	toolResultCh <-chan []toolResultInfo,
 	onCheckpoint func(data []byte),
+	want int,
 ) ([]toolResultInfo, error) {
-	log.Debugf("cursor: waiting for tool result on channel (inline mode)...")
+	if want < 1 {
+		want = 1
+	}
+	log.Debugf("cursor: waiting for %d tool result(s) on channel (inline mode)...", want)
+	var collected []toolResultInfo
 	for {
 		select {
 		case <-ctx.Done():
 			return nil, ctx.Err()
 		case results, ok := <-toolResultCh:
 			if !ok {
-				return nil, nil
+				return collected, nil
 			}
-			return results, nil
+			collected = append(collected, results...)
+			if len(collected) >= want {
+				return collected, nil
+			}
+			// A harness may deliver a parallel batch across several requests;
+			// keep waiting for the remaining results.
+			log.Debugf("cursor: have %d/%d tool results, waiting for more", len(collected), want)
 		case waitData, ok := <-stream.Data():
 			if !ok {
 				return nil, stream.Err()
 			}
 			buf.Write(waitData)
-			for {
-				current := buf.Bytes()
-				if len(current) == 0 {
-					break
-				}
-				flags, payload, consumed, complete := cursorproto.ParseConnectFrame(current)
-				if !complete {
-					break
-				}
-				buf.Next(consumed)
-				if flags&cursorproto.ConnectEndStreamFlag != 0 {
-					continue
-				}
-				msg, err := cursorproto.DecodeAgentServerMessage(payload)
-				if err != nil {
-					continue
-				}
-				switch msg.Type {
-				case cursorproto.ServerMsgKvGetBlob:
-					blobKey := cursorproto.BlobIdHex(msg.BlobId)
-					stream.Write(cursorproto.FrameConnectMessage(cursorproto.EncodeKvGetBlobResult(msg.KvId, blobStore[blobKey]), 0))
-				case cursorproto.ServerMsgKvSetBlob:
-					blobKey := cursorproto.BlobIdHex(msg.BlobId)
-					blobStore[blobKey] = append([]byte(nil), msg.BlobData...)
-					stream.Write(cursorproto.FrameConnectMessage(cursorproto.EncodeKvSetBlobResult(msg.KvId), 0))
-				case cursorproto.ServerMsgExecRequestCtx:
-					stream.Write(cursorproto.FrameConnectMessage(cursorproto.EncodeExecRequestContextResult(msg.ExecMsgId, msg.ExecId, mcpTools), 0))
-				case cursorproto.ServerMsgCheckpoint:
-					if onCheckpoint != nil && len(msg.CheckpointData) > 0 {
-						onCheckpoint(msg.CheckpointData)
-					}
-				case cursorproto.ServerMsgInteractionQuery:
-					if err := stream.Write(cursorproto.FrameConnectMessage(
-						cursorproto.EncodeInteractionResponse(msg.InteractionQueryID, msg.InteractionQueryKind), 0,
-					)); err != nil {
-						return nil, fmt.Errorf("cursor: reply to interaction query: %w", err)
-					}
-				}
+			if err := drainCursorSideChannel(stream, buf, blobStore, mcpTools, onCheckpoint, nil); err != nil {
+				return nil, err
 			}
 		case <-stream.Done():
 			return nil, stream.Err()
@@ -1264,6 +1435,168 @@ type parsedOpenAIRequest struct {
 type toolResultInfo struct {
 	ToolCallId string
 	Content    string
+}
+
+// sanitizeCursorToolCallID replaces control characters so OpenAI/SSE clients can
+// round-trip the id. Cursor currently emits MCP ids containing a literal newline
+// (`call-…\nfc_…`); exact-match resume then silently drops the tool result and
+// the H2 stream waits forever.
+func sanitizeCursorToolCallID(id string) string {
+	if id == "" {
+		return id
+	}
+	var b strings.Builder
+	b.Grow(len(id))
+	changed := false
+	for i := 0; i < len(id); i++ {
+		c := id[i]
+		if c < 32 || c == 127 {
+			b.WriteByte('_')
+			changed = true
+			continue
+		}
+		b.WriteByte(c)
+	}
+	if !changed {
+		return id
+	}
+	return b.String()
+}
+
+func compactCursorToolCallID(id string) string {
+	var b strings.Builder
+	b.Grow(len(id))
+	for i := 0; i < len(id); i++ {
+		c := id[i]
+		if c < 32 || c == 127 || c == '_' {
+			continue
+		}
+		b.WriteByte(c)
+	}
+	return b.String()
+}
+
+func cursorToolCallIDsCompatible(a, b string) bool {
+	if a == b {
+		return true
+	}
+	if sanitizeCursorToolCallID(a) == sanitizeCursorToolCallID(b) {
+		return true
+	}
+	ca, cb := compactCursorToolCallID(a), compactCursorToolCallID(b)
+	return ca != "" && ca == cb
+}
+
+func matchCursorToolResult(pending pendingMcpExec, results []toolResultInfo) (toolResultInfo, string) {
+	tr, kind, _ := matchCursorToolResultAt(pending, results, nil)
+	return tr, kind
+}
+
+// matchCursorToolResultAt resolves the result for one pending exec while
+// skipping entries already consumed by a sibling exec in the same batch. It
+// returns the index of the consumed result so callers can mark it used.
+func matchCursorToolResultAt(pending pendingMcpExec, results []toolResultInfo, used []bool) (toolResultInfo, string, int) {
+	free := func(i int) bool { return used == nil || !used[i] }
+	for i, tr := range results {
+		if free(i) && tr.ToolCallId == pending.ToolCallId {
+			return tr, "exact", i
+		}
+	}
+	for i, tr := range results {
+		if free(i) && cursorToolCallIDsCompatible(tr.ToolCallId, pending.ToolCallId) {
+			return tr, "normalized", i
+		}
+	}
+	for i := len(results) - 1; i >= 0; i-- {
+		if free(i) {
+			return results[i], "fallback", i
+		}
+	}
+	return toolResultInfo{}, "", -1
+}
+
+// sendCursorToolResults answers every exec Cursor opened for this turn. Each
+// exec must receive either a result or an error frame, otherwise the H2 turn
+// stalls and the calling harness hangs until it times out.
+func sendCursorToolResults(stream *cursorproto.H2Stream, pending []pendingMcpExec, results []toolResultInfo) error {
+	used := make([]bool, len(results))
+	for _, exec := range pending {
+		tr, kind, idx := matchCursorToolResultAt(exec, results, used)
+		if idx >= 0 {
+			used[idx] = true
+		}
+		if exec.NativeShell {
+			if err := writeCursorNativeShellResult(stream, exec, tr, kind); err != nil {
+				return err
+			}
+			continue
+		}
+		if err := writeCursorMcpToolResult(stream, exec, tr, kind); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func writeCursorMcpToolResult(stream *cursorproto.H2Stream, pending pendingMcpExec, tr toolResultInfo, kind string) error {
+	if kind == "" {
+		log.Warnf("cursor: no client tool result for tool=%s; sending error to unblock Cursor", pending.ToolName)
+		if err := stream.Write(cursorproto.FrameConnectMessage(
+			cursorproto.EncodeExecMcpError(pending.ExecMsgId, pending.ExecId, "tool result was not returned by the client"), 0,
+		)); err != nil {
+			return fmt.Errorf("cursor: send MCP error: %w", err)
+		}
+		return nil
+	}
+	if kind != "exact" {
+		log.Warnf("cursor: tool result matched via %s for tool=%s", kind, pending.ToolName)
+	}
+	log.Debugf("cursor: sending inline MCP result for tool=%s match=%s", pending.ToolName, kind)
+	if err := stream.Write(cursorproto.FrameConnectMessage(
+		cursorproto.EncodeExecMcpResult(pending.ExecMsgId, pending.ExecId, tr.Content, false), 0,
+	)); err != nil {
+		return fmt.Errorf("cursor: send MCP result: %w", err)
+	}
+	return nil
+}
+
+func writeCursorNativeShellResult(stream *cursorproto.H2Stream, pending pendingMcpExec, tr toolResultInfo, kind string) error {
+	if kind == "" {
+		log.Warnf("cursor: no client tool result for native shell; rejecting to unblock Cursor")
+		if err := stream.Write(cursorproto.FrameConnectMessage(
+			cursorproto.EncodeExecShellRejected(pending.ExecMsgId, pending.ExecId, pending.Command, pending.WorkingDirectory, "tool result was not returned by the client"), 0,
+		)); err != nil {
+			return fmt.Errorf("cursor: send shell rejection: %w", err)
+		}
+		return nil
+	}
+	if kind != "exact" {
+		log.Warnf("cursor: native shell result matched via %s", kind)
+	}
+	log.Debugf("cursor: sending inline native shell result for command=%q match=%s", pending.Command, kind)
+	if pending.NativeShellStream {
+		if err := stream.Write(cursorproto.FrameConnectMessage(cursorproto.EncodeExecShellStreamStart(pending.ExecMsgId, pending.ExecId), 0)); err != nil {
+			return fmt.Errorf("cursor: send shell stream start: %w", err)
+		}
+		if tr.Content != "" {
+			if err := stream.Write(cursorproto.FrameConnectMessage(cursorproto.EncodeExecShellStreamStdout(pending.ExecMsgId, pending.ExecId, tr.Content), 0)); err != nil {
+				return fmt.Errorf("cursor: send shell stream stdout: %w", err)
+			}
+		}
+		if err := stream.Write(cursorproto.FrameConnectMessage(cursorproto.EncodeExecShellStreamExit(pending.ExecMsgId, pending.ExecId, 0, pending.WorkingDirectory), 0)); err != nil {
+			return fmt.Errorf("cursor: send shell stream exit: %w", err)
+		}
+		if err := stream.Write(cursorproto.FrameConnectMessage(cursorproto.EncodeExecClientStreamClose(pending.ExecMsgId), 0)); err != nil {
+			return fmt.Errorf("cursor: send shell stream close: %w", err)
+		}
+		return nil
+	}
+	if err := stream.Write(cursorproto.FrameConnectMessage(
+		cursorproto.EncodeExecShellSuccess(pending.ExecMsgId, pending.ExecId, pending.Command, pending.WorkingDirectory, tr.Content, "", 0), 0,
+	)); err != nil {
+		return fmt.Errorf("cursor: send shell success: %w", err)
+	}
+	return nil
 }
 
 func parseOpenAIRequest(payload []byte) *parsedOpenAIRequest {
@@ -1297,7 +1630,7 @@ func parseOpenAIRequest(payload []byte) *parsedOpenAIRequest {
 			continue
 		case "tool":
 			p.ToolResults = append(p.ToolResults, toolResultInfo{
-				ToolCallId: msg.Get("tool_call_id").String(),
+				ToolCallId: sanitizeCursorToolCallID(msg.Get("tool_call_id").String()),
 				Content:    extractTextContent(msg.Get("content")),
 			})
 		case "user":
@@ -1459,9 +1792,12 @@ func parseDataURL(url string) *cursorproto.ImageData {
 	}
 }
 
-func buildRunRequestParams(parsed *parsedOpenAIRequest, conversationId string) *cursorproto.RunRequestParams {
+func buildRunRequestParams(parsed *parsedOpenAIRequest, conversationId, modelID string) *cursorproto.RunRequestParams {
+	if modelID == "" {
+		modelID = parsed.Model
+	}
 	params := &cursorproto.RunRequestParams{
-		ModelId:        parsed.Model,
+		ModelId:        modelID,
 		SystemPrompt:   parsed.SystemPrompt,
 		UserText:       parsed.UserText,
 		MessageId:      uuid.New().String(),
@@ -1888,6 +2224,36 @@ func decodeMcpArgsToJSON(args map[string][]byte) string {
 }
 
 // --- Model Discovery ---
+
+// WithCursorGrok46VirtualModel adds the Pi/CPA virtual ID `cursor-grok-4.6` when
+// Cursor's catalog only published the tiered Grok 4.6 IDs. Auth selection keys
+// off registered model IDs, so without this the virtual name 503s even though
+// the executor can remap effort/fast after a Cursor auth is chosen.
+func WithCursorGrok46VirtualModel(models []*registry.ModelInfo) []*registry.ModelInfo {
+	var template *registry.ModelInfo
+	for _, model := range models {
+		if model == nil {
+			continue
+		}
+		if model.ID == "cursor-grok-4.6" {
+			return models
+		}
+		if model.ID == "cursor-grok-4.6-high" {
+			template = model
+			continue
+		}
+		if template == nil && strings.HasPrefix(model.ID, "cursor-grok-4.6-") {
+			template = model
+		}
+	}
+	if template == nil {
+		return models
+	}
+	virtual := *template
+	virtual.ID = "cursor-grok-4.6"
+	virtual.DisplayName = "Cursor Grok 4.6"
+	return append(models, &virtual)
+}
 
 // FetchCursorModels retrieves available models from Cursor's API.
 func FetchCursorModels(ctx context.Context, auth *cliproxyauth.Auth, cfg *config.Config) []*registry.ModelInfo {
