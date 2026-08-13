@@ -314,6 +314,8 @@ func (s *Service) registerModelRefreshCallback() {
 			return
 		}
 
+		s.registerCodexCatalogModels()
+
 		providerSet := make(map[string]bool, len(changedProviders))
 		for _, p := range changedProviders {
 			providerSet[strings.ToLower(strings.TrimSpace(p))] = true

@@ -120,7 +120,10 @@ func (s *Service) Run(ctx context.Context) error {
 	s.syncPluginRuntimeConfig(ctx)
 	if homeEnabled {
 		s.syncPluginModelRuntime(ctx)
+	} else {
+		s.bindLoadedAuthModels(ctx)
 	}
+	s.registerCodexCatalogModels()
 
 	if s.authManager == nil {
 		s.authManager = newDefaultAuthManager()

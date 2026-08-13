@@ -71,6 +71,44 @@ func GetCodexProModels() []*ModelInfo {
 	return WithCodexBuiltins(cloneModelInfos(getModels().CodexPro))
 }
 
+// GetCodexCatalogModels returns the union of every Codex plan tier plus builtins.
+// Routing uses this snapshot so a single plan-tier refresh cannot hide a model
+// that another still-valid Codex catalog still advertises.
+func GetCodexCatalogModels() []*ModelInfo {
+	data := getModels()
+	return WithCodexBuiltins(mergeModelInfos(
+		cloneModelInfos(data.CodexFree),
+		cloneModelInfos(data.CodexTeam),
+		cloneModelInfos(data.CodexPlus),
+		cloneModelInfos(data.CodexPro),
+	))
+}
+
+func mergeModelInfos(sections ...[]*ModelInfo) []*ModelInfo {
+	seen := make(map[string]struct{})
+	out := make([]*ModelInfo, 0)
+	for _, section := range sections {
+		for _, model := range section {
+			if model == nil {
+				continue
+			}
+			id := strings.ToLower(strings.TrimSpace(model.ID))
+			if id == "" {
+				continue
+			}
+			if _, exists := seen[id]; exists {
+				continue
+			}
+			seen[id] = struct{}{}
+			out = append(out, cloneModelInfo(model))
+		}
+	}
+	if len(out) == 0 {
+		return nil
+	}
+	return out
+}
+
 // GetKimiModels returns the standard Kimi (Moonshot AI) model definitions.
 func GetKimiModels() []*ModelInfo {
 	return cloneModelInfos(getModels().Kimi)
