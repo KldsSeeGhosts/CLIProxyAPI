@@ -95,6 +95,10 @@ func (e *KimiExecutor) HttpRequest(ctx context.Context, auth *cliproxyauth.Auth,
 func (e *KimiExecutor) Execute(ctx context.Context, auth *cliproxyauth.Auth, req cliproxyexecutor.Request, opts cliproxyexecutor.Options) (resp cliproxyexecutor.Response, err error) {
 	from := opts.SourceFormat
 	if from.String() == "claude" {
+		req.Payload, err = normalizeKimiClaudeToolReferences(req.Payload)
+		if err != nil {
+			return resp, err
+		}
 		auth.Attributes["base_url"] = kimiauth.KimiAPIBaseURL
 		preparedReq, replayScope := prepareKimiThinkingReplayRequest(ctx, req, opts)
 		claudeResp, errExecute := e.ClaudeExecutor.Execute(ctx, auth, preparedReq, opts)
@@ -217,6 +221,10 @@ func (e *KimiExecutor) Execute(ctx context.Context, auth *cliproxyauth.Auth, req
 func (e *KimiExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.Auth, req cliproxyexecutor.Request, opts cliproxyexecutor.Options) (_ *cliproxyexecutor.StreamResult, err error) {
 	from := opts.SourceFormat
 	if from.String() == "claude" {
+		req.Payload, err = normalizeKimiClaudeToolReferences(req.Payload)
+		if err != nil {
+			return nil, err
+		}
 		auth.Attributes["base_url"] = kimiauth.KimiAPIBaseURL
 		preparedReq, replayScope := prepareKimiThinkingReplayRequest(ctx, req, opts)
 		claudeResult, errExecute := e.ClaudeExecutor.ExecuteStream(ctx, auth, preparedReq, opts)
@@ -301,7 +309,27 @@ func (e *KimiExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.Aut
 
 	httpClient := helps.NewProxyAwareHTTPClient(ctx, e.cfg, auth, 0)
 	httpClient = reporter.TrackHTTPClient(httpClient)
-	httpResp, err := httpClient.Do(httpReq)
+	startStream := func(reqBody []byte) (*http.Response, error) {
+		streamReq, errReq := http.NewRequestWithContext(ctx, http.MethodPost, url, bytes.NewReader(reqBody))
+		if errReq != nil {
+			return nil, errReq
+		}
+		applyKimiHeadersWithAuth(streamReq, token, true, auth)
+		util.ApplyCustomHeadersFromAttrs(streamReq, attrs)
+		helps.RecordAPIRequest(ctx, e.cfg, helps.UpstreamRequestLog{
+			URL:       url,
+			Method:    http.MethodPost,
+			Headers:   streamReq.Header.Clone(),
+			Body:      reqBody,
+			Provider:  e.Identifier(),
+			AuthID:    authID,
+			AuthLabel: authLabel,
+			AuthType:  authType,
+			AuthValue: authValue,
+		})
+		return httpClient.Do(streamReq)
+	}
+	httpResp, err := startStream(body)
 	if err != nil {
 		helps.RecordAPIResponseError(ctx, e.cfg, err)
 		return nil, err
@@ -320,45 +348,168 @@ func (e *KimiExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.Aut
 	out := make(chan cliproxyexecutor.StreamChunk)
 	go func() {
 		defer close(out)
-		defer func() {
-			if errClose := httpResp.Body.Close(); errClose != nil {
-				log.Errorf("kimi executor: close response body error: %v", errClose)
-			}
-		}()
-		scanner := bufio.NewScanner(httpResp.Body)
-		scanner.Buffer(nil, 1_048_576) // 1MB
 		claudeInputTokens := helps.NewClaudeInputTokenState(from, to, responseFormat, originalPayload)
 		var param any
 		var streamUsage helps.StreamUsageBuffer
 		defer streamUsage.Publish(ctx, reporter)
-		for scanner.Scan() {
-			line := scanner.Bytes()
-			helps.AppendAPIResponseChunk(ctx, e.cfg, line)
-			streamUsage.ObserveOpenAIStream(line)
-			chunks := helps.TranslateStreamWithClaudeInputTokens(ctx, to, responseFormat, req.Model, opts.OriginalRequest, body, bytes.Clone(line), &param, claudeInputTokens)
-			for i := range chunks {
+		cont, contOK := newCodexContinuationController(ctx, opts.Headers, e.cfg, req.Model, responseFormat, body)
+		currentBody := body
+		passResp := httpResp
+		flushDone := func() bool {
+			doneChunks := helps.TranslateStreamWithClaudeInputTokens(ctx, to, responseFormat, req.Model, opts.OriginalRequest, currentBody, []byte("[DONE]"), &param, claudeInputTokens)
+			for i := range doneChunks {
 				select {
-				case out <- cliproxyexecutor.StreamChunk{Payload: chunks[i]}:
+				case out <- cliproxyexecutor.StreamChunk{Payload: doneChunks[i]}:
 				case <-ctx.Done():
+					return false
+				}
+			}
+			return true
+		}
+		emitFailure := func(decision codexContinuationDecision) {
+			streamErr := decision.err
+			if streamErr == nil {
+				streamErr = newCodexTerminalIntegrityError(decision.classification, "terminal arbiter rejected the upstream boundary")
+			}
+			log.Warnf("kimi executor: codex terminal arbiter model=%s boundary_class=%s outcome=%s pass=%d: %v", req.Model, decision.classification, decision.outcome, cont.passIndex, streamErr)
+			helps.RecordAPIResponseError(ctx, e.cfg, streamErr)
+			reporter.PublishFailure(ctx, streamErr)
+			select {
+			case out <- cliproxyexecutor.StreamChunk{Err: streamErr}:
+			case <-ctx.Done():
+			}
+		}
+		for {
+			scanner := bufio.NewScanner(passResp.Body)
+			scanner.Buffer(nil, 1_048_576) // 1MB
+			continueUpstream := false
+			terminalForwarded := false
+			aborted := false
+			failed := false
+			for scanner.Scan() {
+				line := scanner.Bytes()
+				helps.AppendAPIResponseChunk(ctx, e.cfg, line)
+				streamUsage.ObserveOpenAIStream(line)
+				upstreamDone := isCodexUpstreamDoneLine(line)
+				if contOK {
+					cont.observe(line)
+					if upstreamDone {
+						decision := cont.decide(codexContinuationBoundaryExplicitDone, nil)
+						log.Infof("kimi executor: codex terminal arbiter model=%s boundary=%s classification=%s outcome=%s pass=%d", req.Model, codexContinuationBoundaryExplicitDone, decision.classification, decision.outcome, cont.passIndex)
+						switch decision.outcome {
+						case codexContinuationOutcomeContinue:
+							continueUpstream = true
+							break
+						case codexContinuationOutcomeFail:
+							emitFailure(decision)
+							failed = true
+							break
+						case codexContinuationOutcomeComplete:
+							line = cont.offsetLine(line)
+						}
+					} else {
+						line = cont.offsetLine(line)
+					}
+				}
+				if continueUpstream || failed {
+					break
+				}
+				chunks := helps.TranslateStreamWithClaudeInputTokens(ctx, to, responseFormat, req.Model, opts.OriginalRequest, currentBody, bytes.Clone(line), &param, claudeInputTokens)
+				for i := range chunks {
+					select {
+					case out <- cliproxyexecutor.StreamChunk{Payload: chunks[i]}:
+					case <-ctx.Done():
+						aborted = true
+						break
+					}
+				}
+				if aborted {
+					break
+				}
+				if upstreamDone {
+					terminalForwarded = true
+					break
+				}
+			}
+			if errClose := passResp.Body.Close(); errClose != nil {
+				log.Errorf("kimi executor: close response body error: %v", errClose)
+			}
+			if aborted || failed {
+				return
+			}
+			if terminalForwarded {
+				return
+			}
+			scanErr := scanner.Err()
+			if !continueUpstream {
+				if scanErr != nil {
+					if contOK {
+						emitFailure(cont.decide(codexContinuationBoundaryReadError, scanErr))
+					} else {
+						helps.RecordAPIResponseError(ctx, e.cfg, scanErr)
+						reporter.PublishFailure(ctx, scanErr)
+						select {
+						case out <- cliproxyexecutor.StreamChunk{Err: scanErr}:
+						case <-ctx.Done():
+						}
+					}
+					return
+				}
+				if contOK {
+					decision := cont.decide(codexContinuationBoundaryCleanEOF, nil)
+					log.Infof("kimi executor: codex terminal arbiter model=%s boundary=%s classification=%s outcome=%s pass=%d", req.Model, codexContinuationBoundaryCleanEOF, decision.classification, decision.outcome, cont.passIndex)
+					switch decision.outcome {
+					case codexContinuationOutcomeContinue:
+						continueUpstream = true
+					case codexContinuationOutcomeFail:
+						emitFailure(decision)
+						return
+					case codexContinuationOutcomeComplete:
+						if !flushDone() {
+							return
+						}
+						return
+					}
+				} else {
+					flushDone()
 					return
 				}
 			}
-		}
-		doneChunks := helps.TranslateStreamWithClaudeInputTokens(ctx, to, responseFormat, req.Model, opts.OriginalRequest, body, []byte("[DONE]"), &param, claudeInputTokens)
-		for i := range doneChunks {
-			select {
-			case out <- cliproxyexecutor.StreamChunk{Payload: doneChunks[i]}:
-			case <-ctx.Done():
+			nextBody, okNext := cont.continuationBody(currentBody)
+			if !okNext {
+				emitFailure(codexContinuationDecision{
+					outcome:        codexContinuationOutcomeFail,
+					classification: "continuation_state_error",
+					err:            newCodexTerminalIntegrityError("continuation_state_error", "terminal arbiter selected continuation but no continuation body could be built"),
+				})
 				return
 			}
-		}
-		if errScan := scanner.Err(); errScan != nil {
-			helps.RecordAPIResponseError(ctx, e.cfg, errScan)
-			reporter.PublishFailure(ctx, errScan)
-			select {
-			case out <- cliproxyexecutor.StreamChunk{Err: errScan}:
-			case <-ctx.Done():
+			log.Infof("kimi executor: continuing stalled Codex turn without a tool call (model %s, pass %d)", req.Model, cont.passIndex)
+			nextResp, errNext := startStream(nextBody)
+			if errNext == nil {
+				helps.RecordAPIResponseMetadata(ctx, e.cfg, nextResp.StatusCode, nextResp.Header.Clone())
+				if nextResp.StatusCode < 200 || nextResp.StatusCode >= 300 {
+					b, _ := io.ReadAll(nextResp.Body)
+					helps.AppendAPIResponseChunk(ctx, e.cfg, b)
+					if errClose := nextResp.Body.Close(); errClose != nil {
+						log.Errorf("kimi executor: close continuation response body error: %v", errClose)
+					}
+					errNext = statusErr{code: nextResp.StatusCode, msg: string(b)}
+				}
 			}
+			if errNext != nil {
+				emitFailure(codexContinuationDecision{
+					outcome:        codexContinuationOutcomeFail,
+					classification: "continuation_request_failed",
+					err: &codexTerminalIntegrityError{
+						classification: "continuation_request_failed",
+						cause:          fmt.Errorf("semantic continuation request failed: %w", errNext),
+					},
+				})
+				return
+			}
+			currentBody = nextBody
+			passResp = nextResp
 		}
 	}()
 	return &cliproxyexecutor.StreamResult{Headers: httpResp.Header.Clone(), Chunks: out}, nil
@@ -366,8 +517,86 @@ func (e *KimiExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.Aut
 
 // CountTokens estimates token count for Kimi requests.
 func (e *KimiExecutor) CountTokens(ctx context.Context, auth *cliproxyauth.Auth, req cliproxyexecutor.Request, opts cliproxyexecutor.Options) (cliproxyexecutor.Response, error) {
+	var err error
+	req.Payload, err = normalizeKimiClaudeToolReferences(req.Payload)
+	if err != nil {
+		return cliproxyexecutor.Response{}, err
+	}
 	auth.Attributes["base_url"] = kimiauth.KimiAPIBaseURL
 	return e.ClaudeExecutor.countTokensUpstream(ctx, auth, req, opts)
+}
+
+// normalizeKimiClaudeToolReferences converts Claude Code's deferred-tool references
+// into text blocks because Kimi's Anthropic-compatible endpoint rejects the
+// tool_reference content type.
+func normalizeKimiClaudeToolReferences(body []byte) ([]byte, error) {
+	if len(body) == 0 || !gjson.ValidBytes(body) {
+		return body, nil
+	}
+
+	messages := gjson.GetBytes(body, "messages")
+	if !messages.IsArray() {
+		return body, nil
+	}
+
+	out := body
+	for messageIndex, message := range messages.Array() {
+		content := message.Get("content")
+		if !content.IsArray() {
+			continue
+		}
+		for contentIndex, block := range content.Array() {
+			blockPath := fmt.Sprintf("messages.%d.content.%d", messageIndex, contentIndex)
+			switch block.Get("type").String() {
+			case "tool_reference":
+				var err error
+				out, err = replaceKimiToolReference(out, blockPath, block)
+				if err != nil {
+					return body, err
+				}
+			case "tool_result":
+				nestedContent := block.Get("content")
+				if !nestedContent.IsArray() {
+					continue
+				}
+				for nestedIndex, nestedBlock := range nestedContent.Array() {
+					if nestedBlock.Get("type").String() != "tool_reference" {
+						continue
+					}
+					path := fmt.Sprintf("%s.content.%d", blockPath, nestedIndex)
+					var err error
+					out, err = replaceKimiToolReference(out, path, nestedBlock)
+					if err != nil {
+						return body, err
+					}
+				}
+			}
+		}
+	}
+	return out, nil
+}
+
+func replaceKimiToolReference(body []byte, path string, reference gjson.Result) ([]byte, error) {
+	text := "Tool reference"
+	if toolName := strings.TrimSpace(reference.Get("tool_name").String()); toolName != "" {
+		text += ": " + toolName
+	}
+
+	replacement, err := sjson.SetBytes([]byte(`{"type":"text"}`), "text", text)
+	if err != nil {
+		return body, fmt.Errorf("kimi executor: failed to convert tool reference: %w", err)
+	}
+	if cacheControl := reference.Get("cache_control"); cacheControl.Exists() {
+		replacement, err = sjson.SetRawBytes(replacement, "cache_control", []byte(cacheControl.Raw))
+		if err != nil {
+			return body, fmt.Errorf("kimi executor: failed to preserve tool reference cache control: %w", err)
+		}
+	}
+	out, err := sjson.SetRawBytes(body, path, replacement)
+	if err != nil {
+		return body, fmt.Errorf("kimi executor: failed to replace tool reference: %w", err)
+	}
+	return out, nil
 }
 
 func normalizeKimiToolMessageLinks(body []byte) ([]byte, error) {

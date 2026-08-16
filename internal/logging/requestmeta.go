@@ -3,6 +3,7 @@ package logging
 import (
 	"context"
 	"net/http"
+	"strings"
 	"sync"
 	"sync/atomic"
 )
@@ -14,9 +15,53 @@ type clientRequestMetadataKey struct{}
 
 // ClientRequestMetadata stores immutable downstream request metadata for asynchronous consumers.
 type ClientRequestMetadata struct {
-	ClientIP      string
-	XForwardedFor string
-	UserAgent     string
+	ClientIP         string
+	XForwardedFor    string
+	UserAgent        string
+	ClientOriginator string
+	ClientUserAgent  string
+}
+
+const (
+	maxClientOriginatorBytes = 128
+	maxClientUserAgentBytes  = 512
+)
+
+// SanitizeClientIdentity returns only the two bounded downstream identity
+// values intentionally retained for usage telemetry.
+func SanitizeClientIdentity(originator, userAgent string) (string, string) {
+	return sanitizeClientIdentityValue(originator, maxClientOriginatorBytes),
+		sanitizeClientIdentityValue(userAgent, maxClientUserAgentBytes)
+}
+
+func sanitizeClientIdentityValue(value string, maxBytes int) string {
+	value = strings.TrimSpace(value)
+	if value == "" || maxBytes <= 0 {
+		return ""
+	}
+	var builder strings.Builder
+	lastSpace := false
+	for _, r := range value {
+		if r < 0x20 || r == 0x7f {
+			if r != '\t' && r != '\n' && r != '\r' {
+				continue
+			}
+			r = ' '
+		}
+		if r == ' ' {
+			if lastSpace {
+				continue
+			}
+			lastSpace = true
+		} else {
+			lastSpace = false
+		}
+		if builder.Len()+len(string(r)) > maxBytes {
+			break
+		}
+		builder.WriteRune(r)
+	}
+	return strings.TrimSpace(builder.String())
 }
 
 type responseStatusHolder struct {

@@ -121,6 +121,14 @@ func tryRefreshModels(ctx context.Context, label string) {
 		return
 	}
 
+	if n := enforceOfficialGpt56ContextWindows(parsed); n > 0 {
+		log.Infof("%s: clamped %d GPT-5.6 context_length field(s) to %d from %s", label, n, officialGpt56ContextWindow, url)
+	}
+
+	if n := retainLastKnownGoodCodexCatalog(oldData, parsed); n > 0 {
+		log.Warnf("%s: retained %d Codex catalog section(s) that the remote snapshot omitted", label, n)
+	}
+
 	// Detect changes before updating store.
 	changed := detectChangedProviders(oldData, parsed)
 
@@ -187,6 +195,29 @@ func fetchModelsFromRemote(ctx context.Context) (*staticModelsJSON, string) {
 		return &parsed, url
 	}
 	return nil, ""
+}
+
+// retainLastKnownGoodCodexCatalog keeps the previous Codex plan sections when a
+// remote refresh returns an empty slice for that tier. An empty remote section
+// is treated as a failed/partial snapshot, not as a deliberate catalog wipe.
+func retainLastKnownGoodCodexCatalog(oldData, newData *staticModelsJSON) int {
+	if oldData == nil || newData == nil {
+		return 0
+	}
+	retained := 0
+	retain := func(dst *[]*ModelInfo, src []*ModelInfo, name string) {
+		if dst == nil || len(*dst) > 0 || len(src) == 0 {
+			return
+		}
+		*dst = cloneModelInfos(src)
+		retained++
+		log.Warnf("codex catalog refresh omitted %s; retaining last-known-good snapshot (%d models)", name, len(src))
+	}
+	retain(&newData.CodexFree, oldData.CodexFree, "codex-free")
+	retain(&newData.CodexTeam, oldData.CodexTeam, "codex-team")
+	retain(&newData.CodexPlus, oldData.CodexPlus, "codex-plus")
+	retain(&newData.CodexPro, oldData.CodexPro, "codex-pro")
+	return retained
 }
 
 // detectChangedProviders compares two model catalogs and returns provider names
@@ -298,6 +329,9 @@ func loadModelsFromBytes(data []byte, source string) error {
 	var parsed staticModelsJSON
 	if err := json.Unmarshal(data, &parsed); err != nil {
 		return fmt.Errorf("%s: decode models catalog: %w", source, err)
+	}
+	if n := enforceOfficialGpt56ContextWindows(&parsed); n > 0 {
+		log.Infof("registry: clamped %d GPT-5.6 context_length field(s) to %d from %s", n, officialGpt56ContextWindow, source)
 	}
 	if err := validateModelsCatalog(&parsed); err != nil {
 		return fmt.Errorf("%s: validate models catalog: %w", source, err)

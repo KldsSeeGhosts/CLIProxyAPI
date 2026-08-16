@@ -1336,6 +1336,12 @@ func isConnectionLifecycleError(err error) bool {
 			return true
 		}
 	}
+	// Some upstream proxies return an HTTP 503 even though they failed before
+	// reaching the credential-bearing service. Keep those connection failures
+	// eligible for credential fallback without cooling the selected credential.
+	if isPreHeaderConnectionFailureMessage(err.Error()) {
+		return true
+	}
 	// Credential/auth/quota statuses must never be reclassified from response text.
 	if statusCodeFromError(err) != 0 {
 		return false
@@ -1351,7 +1357,7 @@ func isConnectionLifecycleResultError(err *Error) bool {
 	if err == nil {
 		return false
 	}
-	if err.Code == connectionLifecycleErrorCode {
+	if err.Code == connectionLifecycleErrorCode || isPreHeaderConnectionFailureMessage(err.Message) {
 		return true
 	}
 	// Message fallback only when no HTTP status is attached, so 401/429/5xx
@@ -1366,6 +1372,9 @@ func isConnectionLifecycleMessage(message string) bool {
 	lower := strings.ToLower(strings.TrimSpace(message))
 	if lower == "" {
 		return false
+	}
+	if isPreHeaderConnectionFailureMessage(lower) {
+		return true
 	}
 	switch lower {
 	case "context canceled", "context deadline exceeded", "eof", "unexpected eof":
@@ -1382,6 +1391,12 @@ func isConnectionLifecycleMessage(message string) bool {
 		return true
 	}
 	return false
+}
+
+func isPreHeaderConnectionFailureMessage(message string) bool {
+	lower := strings.ToLower(strings.TrimSpace(message))
+	return strings.Contains(lower, "upstream connect error or disconnect/reset before headers") &&
+		(strings.Contains(lower, "connection timeout") || strings.Contains(lower, "connection failure"))
 }
 
 func isUnauthorizedError(err error) bool {

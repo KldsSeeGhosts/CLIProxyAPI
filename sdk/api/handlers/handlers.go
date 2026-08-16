@@ -431,10 +431,16 @@ func (h *BaseAPIHandler) GetContextWithCancel(handler interfaces.APIHandler, c *
 		newCtx = logging.WithEndpoint(newCtx, endpoint)
 	}
 	if c != nil && c.Request != nil {
+		clientOriginator, clientUserAgent := logging.SanitizeClientIdentity(
+			c.Request.Header.Get("Originator"),
+			c.Request.UserAgent(),
+		)
 		newCtx = logging.WithClientRequestMetadata(newCtx, logging.ClientRequestMetadata{
-			ClientIP:      requestClientIP(c.Request),
-			XForwardedFor: strings.TrimSpace(strings.Join(c.Request.Header.Values("X-Forwarded-For"), ", ")),
-			UserAgent:     strings.TrimSpace(c.Request.UserAgent()),
+			ClientIP:         requestClientIP(c.Request),
+			XForwardedFor:    strings.TrimSpace(strings.Join(c.Request.Header.Values("X-Forwarded-For"), ", ")),
+			UserAgent:        strings.TrimSpace(c.Request.UserAgent()),
+			ClientOriginator: clientOriginator,
+			ClientUserAgent:  clientUserAgent,
 		})
 	}
 	newCtx = logging.WithResponseStatusHolder(newCtx)

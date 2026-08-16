@@ -83,6 +83,7 @@ func ConvertOpenAIResponsesRequestToOpenAIChatCompletions(modelName string, inpu
 		pendingToolCalls := make([]interface{}, 0)
 		pendingToolCallIDs := make([]string, 0)
 		pendingReasoningContent := ""
+		lastAssistantReasoningContent := ""
 		awaitingToolOutputs := make(map[string]struct{})
 		deferredMessages := make([][]byte, 0)
 		mergeableAssistantIndex := -1
@@ -98,6 +99,9 @@ func ConvertOpenAIResponsesRequestToOpenAIChatCompletions(modelName string, inpu
 			}
 
 			reasoningContent := takePendingReasoningContent()
+			if reasoningContent == "" && isDeepSeekModel(modelName) {
+				reasoningContent = lastAssistantReasoningContent
+			}
 			mergedIntoAssistant := false
 			if mergeableAssistantIndex >= 0 && mergeableAssistantIndex == len(messages)-1 {
 				assistantMessage := gjson.ParseBytes(messages[mergeableAssistantIndex])
@@ -116,6 +120,7 @@ func ConvertOpenAIResponsesRequestToOpenAIChatCompletions(modelName string, inpu
 				assistantMessage, _ = sjson.SetBytes(assistantMessage, "tool_calls", pendingToolCalls)
 				if reasoningContent != "" {
 					assistantMessage, _ = sjson.SetBytes(assistantMessage, "reasoning_content", reasoningContent)
+					lastAssistantReasoningContent = reasoningContent
 				}
 				appendMessage(assistantMessage)
 			}
@@ -182,6 +187,7 @@ func ConvertOpenAIResponsesRequestToOpenAIChatCompletions(modelName string, inpu
 				mergeableAssistantIndex = -1
 				if role != "assistant" {
 					appendPendingReasoningMessage()
+					lastAssistantReasoningContent = ""
 				}
 				message := []byte(`{"role":"","content":[]}`)
 				message, _ = sjson.SetBytes(message, "role", role)
@@ -218,8 +224,12 @@ func ConvertOpenAIResponsesRequestToOpenAIChatCompletions(modelName string, inpu
 
 				if role == "assistant" {
 					reasoningContent := combineOpenAIResponsesReasoning(takePendingReasoningContent(), item.Get("reasoning_content").String())
+					if reasoningContent == "" && isDeepSeekModel(modelName) {
+						reasoningContent = lastAssistantReasoningContent
+					}
 					if reasoningContent != "" {
 						message, _ = sjson.SetBytes(message, "reasoning_content", reasoningContent)
+						lastAssistantReasoningContent = reasoningContent
 					}
 				}
 
@@ -557,4 +567,8 @@ func combineOpenAIResponsesReasoning(existing, incoming string) string {
 	default:
 		return existing + "\n\n" + incoming
 	}
+}
+
+func isDeepSeekModel(modelName string) bool {
+	return strings.Contains(strings.ToLower(strings.TrimSpace(modelName)), "deepseek")
 }

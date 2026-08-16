@@ -107,17 +107,10 @@ func geminiResponsesCarrierMatchesAdjacent(items []gjson.Result, index int, dire
 	return false
 }
 
-func hasInternalCarrierFields(item gjson.Result) bool {
-	return item.Get(geminiResponsesCarrierDirectionField).Exists() ||
-		item.Get(geminiResponsesCarrierTargetField).Exists() ||
-		item.Get(geminiResponsesCarrierSignatureField).Exists() ||
-		item.Get(geminiResponsesCarrierSummaryField).Exists()
-}
-
-func stripGeminiResponsesCarrierMetadata(rawJSON string) ([]byte, bool) {
+func stripGeminiResponsesCarrierMetadata(itemJSON []byte) []byte {
 	var fields map[string]json.RawMessage
-	if err := json.Unmarshal([]byte(rawJSON), &fields); err != nil {
-		return []byte(rawJSON), false
+	if err := json.Unmarshal(itemJSON, &fields); err != nil {
+		return itemJSON
 	}
 	delete(fields, geminiResponsesCarrierDirectionField)
 	delete(fields, geminiResponsesCarrierTargetField)
@@ -125,30 +118,20 @@ func stripGeminiResponsesCarrierMetadata(rawJSON string) ([]byte, bool) {
 	delete(fields, geminiResponsesCarrierSummaryField)
 	stripped, errMarshal := json.Marshal(fields)
 	if errMarshal != nil {
-		return []byte(rawJSON), false
+		return itemJSON
 	}
-	return stripped, true
+	return stripped
 }
 
 func normalizeGeminiResponsesCarriers(items []gjson.Result) ([]gjson.Result, bool) {
 	normalized := make([]gjson.Result, 0, len(items))
 	hasValidCarrier := false
 	for itemIndex, originalItem := range items {
-		item := originalItem
-		var itemJSON []byte
-		if hasInternalCarrierFields(originalItem) {
-			stripped, ok := stripGeminiResponsesCarrierMetadata(originalItem.Raw)
-			if ok {
-				itemJSON = stripped
-				item = gjson.ParseBytes(itemJSON)
-			}
-		}
+		itemJSON := stripGeminiResponsesCarrierMetadata([]byte(originalItem.Raw))
+		item := gjson.ParseBytes(itemJSON)
 		if item.Get("type").String() != "reasoning" {
 			normalized = append(normalized, item)
 			continue
-		}
-		if len(itemJSON) == 0 {
-			itemJSON = []byte(item.Raw)
 		}
 		rawSignature := strings.TrimSpace(item.Get("encrypted_content").String())
 		signature, direction, targetKind, marked, ok := decodeGeminiResponsesCarrier(rawSignature)

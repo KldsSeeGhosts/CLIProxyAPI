@@ -9,9 +9,16 @@ import (
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/constant"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/modelconfig"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/registry"
+	"github.com/router-for-me/CLIProxyAPI/v7/internal/runtime/executor"
 	coreauth "github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/auth"
 	"github.com/router-for-me/CLIProxyAPI/v7/sdk/config"
+	log "github.com/sirupsen/logrus"
 )
+
+// codexCatalogClientID is a stable registry client that holds the last-known-good
+// Codex catalog independently of any one auth file. Routing consults this so a
+// refresh or auth rewrite cannot make gpt-5.6-* unresolvable.
+const codexCatalogClientID = "codex:catalog"
 
 // registerModelsForAuth (re)binds provider models in the global registry using the core auth ID as client identifier.
 func (s *Service) registerModelsForAuth(ctx context.Context, a *coreauth.Auth) {
@@ -102,6 +109,7 @@ func (s *Service) registerModelsForAuthWithCache(ctx context.Context, a *coreaut
 	case "antigravity":
 		models = registry.GetAntigravityModels()
 		models = applyAntigravityFetchedModelCapabilities(models, s.fetchAntigravityModelCapabilityHintsForAuth(ctx, a))
+		models = executor.WithGemini37FlashVirtualModel(models)
 		models = applyExcludedModels(models, excluded)
 	case "claude":
 		models = registry.GetClaudeModels()
@@ -143,6 +151,15 @@ func (s *Service) registerModelsForAuthWithCache(ctx context.Context, a *coreaut
 		models = applyExcludedModels(models, excluded)
 	case "kimi":
 		models = registry.GetKimiModels()
+		models = applyExcludedModels(models, excluded)
+	case "cursor":
+		fetchCtx, fetchCancel := context.WithTimeout(ctx, 15*time.Second)
+		models = executor.FetchCursorModels(fetchCtx, a, s.cfg)
+		fetchCancel()
+		if len(models) == 0 {
+			models = registry.GetCursorModels()
+		}
+		models = executor.WithCursorGrok46VirtualModel(models)
 		models = applyExcludedModels(models, excluded)
 	case "xai":
 		models = registry.GetXAIModels()
@@ -276,7 +293,93 @@ func (s *Service) registerModelsForAuthWithCache(ctx context.Context, a *coreaut
 		return
 	}
 
+	if strings.EqualFold(key, constant.Codex) && shouldRetainCodexLastKnownGood(a) {
+		if previous := GlobalModelRegistry().GetModelsForClient(a.ID); len(previous) > 0 {
+			log.Warnf("codex catalog refresh produced no models for %s; retaining last-known-good registration", a.ID)
+			return
+		}
+	}
+
 	GlobalModelRegistry().UnregisterClient(a.ID)
+}
+
+func shouldRetainCodexLastKnownGood(a *coreauth.Auth) bool {
+	if a == nil || a.Disabled {
+		return false
+	}
+	return a.AuthKind() != coreauth.AuthKindAPIKey
+}
+
+func retainLastKnownGoodModels(clientID string, next []*ModelInfo) []*ModelInfo {
+	previous := GlobalModelRegistry().GetModelsForClient(clientID)
+	if len(next) == 0 {
+		return previous
+	}
+	if len(previous) == 0 {
+		return next
+	}
+
+	seen := make(map[string]struct{}, len(next))
+	for _, model := range next {
+		if model == nil {
+			continue
+		}
+		id := strings.ToLower(strings.TrimSpace(model.ID))
+		if id == "" {
+			continue
+		}
+		seen[id] = struct{}{}
+	}
+
+	out := append([]*ModelInfo(nil), next...)
+	retained := 0
+	for _, model := range previous {
+		if model == nil {
+			continue
+		}
+		id := strings.ToLower(strings.TrimSpace(model.ID))
+		if id == "" {
+			continue
+		}
+		if _, exists := seen[id]; exists {
+			continue
+		}
+		out = append(out, model)
+		retained++
+	}
+	if retained > 0 {
+		log.Warnf("retained %d last-known-good model(s) for %s after catalog refresh omitted them", retained, clientID)
+	}
+	return out
+}
+
+func (s *Service) registerCodexCatalogModels() {
+	models := registry.GetCodexCatalogModels()
+	if s != nil {
+		models = applyExcludedModels(models, s.oauthExcludedModels(constant.Codex, "oauth"))
+	}
+	models = retainLastKnownGoodModels(codexCatalogClientID, models)
+	if len(models) == 0 {
+		return
+	}
+	GlobalModelRegistry().RegisterClient(codexCatalogClientID, constant.Codex, models)
+}
+
+func (s *Service) bindLoadedAuthModels(ctx context.Context) {
+	if s == nil || s.coreManager == nil {
+		return
+	}
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	auths := s.coreManager.List()
+	for _, auth := range auths {
+		if auth == nil || auth.Disabled {
+			continue
+		}
+		s.ensureExecutorsForAuthWithContext(ctx, auth, false)
+	}
+	s.registerModelsForAuthBatch(ctx, auths)
 }
 
 // refreshModelRegistrationForAuth re-applies the latest model registration for

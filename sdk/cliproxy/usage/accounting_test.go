@@ -102,12 +102,13 @@ func TestEnsureTokenBreakdownForProviderUsesKnownSemantics(t *testing.T) {
 			wantOutput: 42,
 		},
 		{
-			name:       "Claude keeps cache and reasoning independent",
-			provider:   "anthropic",
-			detail:     Detail{InputTokens: 100, OutputTokens: 30, ReasoningTokens: 12, CacheReadTokens: 40, CacheCreationTokens: 10},
-			wantTotal:  192,
-			wantInput:  150,
-			wantOutput: 42,
+			name:         "Cursor treats checkpoint cache as subset of input",
+			provider:     "cursor",
+			executorType: "CursorExecutor",
+			detail:       Detail{InputTokens: 100, OutputTokens: 30, ReasoningTokens: 12, CacheReadTokens: 40, CacheCreationTokens: 10},
+			wantTotal:    130,
+			wantInput:    100,
+			wantOutput:   30,
 		},
 	}
 	for _, tt := range tests {

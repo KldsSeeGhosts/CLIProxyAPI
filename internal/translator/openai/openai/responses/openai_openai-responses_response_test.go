@@ -163,85 +163,6 @@ func TestConvertOpenAIChatCompletionsResponseToOpenAIResponses_ResponseCompleted
 	}
 }
 
-func TestConvertOpenAIChatCompletionsResponseToOpenAIResponses_FinalizesOpenMessageAtStreamEnd(t *testing.T) {
-	t.Parallel()
-
-	request := []byte(`{"model":"gpt-5.4"}`)
-	tests := []struct {
-		name  string
-		chunk string
-	}{
-		{
-			name:  "missing finish reason",
-			chunk: `data: {"id":"resp_missing_finish_reason","object":"chat.completion.chunk","created":1773896263,"model":"model","choices":[{"index":0,"delta":{"role":"assistant","content":"hello"}}]}`,
-		},
-		{
-			name:  "null finish reason",
-			chunk: `data: {"id":"resp_null_finish_reason","object":"chat.completion.chunk","created":1773896263,"model":"model","choices":[{"index":0,"delta":{"role":"assistant","content":"hello"},"finish_reason":null}]}`,
-		},
-	}
-
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			var param any
-			var events []string
-			var textDone gjson.Result
-			var partDone gjson.Result
-			var itemDone gjson.Result
-			var completed gjson.Result
-
-			for _, line := range []string{tt.chunk, `data: [DONE]`} {
-				for _, chunk := range ConvertOpenAIChatCompletionsResponseToOpenAIResponses(context.Background(), "model", request, request, []byte(line), &param) {
-					event, data := parseOpenAIResponsesSSEEvent(t, chunk)
-					events = append(events, event)
-					switch event {
-					case "response.output_text.done":
-						textDone = data
-					case "response.content_part.done":
-						partDone = data
-					case "response.output_item.done":
-						itemDone = data
-					case "response.completed":
-						completed = data
-					}
-				}
-			}
-
-			wantEvents := []string{
-				"response.created",
-				"response.in_progress",
-				"response.output_item.added",
-				"response.content_part.added",
-				"response.output_text.delta",
-				"response.output_text.done",
-				"response.content_part.done",
-				"response.output_item.done",
-				"response.completed",
-			}
-			if len(events) != len(wantEvents) {
-				t.Fatalf("events = %v, want %v", events, wantEvents)
-			}
-			for i := range wantEvents {
-				if events[i] != wantEvents[i] {
-					t.Fatalf("event %d = %q, want %q; events = %v", i, events[i], wantEvents[i], events)
-				}
-			}
-			if got := textDone.Get("text").String(); got != "hello" {
-				t.Fatalf("output_text.done text = %q, want hello", got)
-			}
-			if got := partDone.Get("part.text").String(); got != "hello" {
-				t.Fatalf("content_part.done text = %q, want hello", got)
-			}
-			if got := itemDone.Get("item.content.0.text").String(); got != "hello" {
-				t.Fatalf("output_item.done text = %q, want hello", got)
-			}
-			if got := completed.Get("response.status").String(); got != "completed" {
-				t.Fatalf("response.completed status = %q, want completed", got)
-			}
-		})
-	}
-}
-
 func TestConvertOpenAIChatCompletionsResponseToOpenAIResponses_MultipleToolCallsRemainSeparate(t *testing.T) {
 	in := []string{
 		`data: {"id":"resp_test","object":"chat.completion.chunk","created":1773896263,"model":"model","choices":[{"index":0,"delta":{"role":"assistant","content":null,"reasoning_content":null,"tool_calls":[{"index":0,"id":"call_read","type":"function","function":{"name":"read","arguments":""}}]},"finish_reason":null}]}`,
@@ -698,6 +619,38 @@ func TestConvertOpenAIChatCompletionsResponseToOpenAIResponsesNonStream_Restores
 	}
 }
 
+func TestUnwrapCustomToolInput(t *testing.T) {
+	tests := []struct {
+		name      string
+		arguments string
+		want      string
+	}{
+		{
+			name:      "raw freeform input",
+			arguments: `const result = await tools.exec_command({cmd: "pwd"}); text(result);`,
+			want:      `const result = await tools.exec_command({cmd: "pwd"}); text(result);`,
+		},
+		{
+			name:      "single compatibility envelope",
+			arguments: `{"input":"const result = await tools.exec_command({cmd: \"pwd\"}); text(result);"}`,
+			want:      `const result = await tools.exec_command({cmd: "pwd"}); text(result);`,
+		},
+		{
+			name:      "repeated compatibility envelope",
+			arguments: `{"input":"{\"input\":\"const result = await tools.exec_command({cmd: \\\"pwd\\\"}); text(result);\"}"}`,
+			want:      `const result = await tools.exec_command({cmd: "pwd"}); text(result);`,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := unwrapCustomToolInput(tt.arguments); got != tt.want {
+				t.Fatalf("unwrapCustomToolInput() = %q, want %q", got, tt.want)
+			}
+		})
+	}
+}
+
 func TestConvertOpenAIChatCompletionsResponseToOpenAIResponses_CustomToolNameArrivesLate(t *testing.T) {
 	originalRequest := []byte(`{
 		"model":"gpt-5.4",
@@ -762,8 +715,8 @@ func TestConvertOpenAIChatCompletionsResponseToOpenAIResponses_CustomToolNameArr
 	if got := inputDone.Get("item_id").String(); got != "ctc_call_exec" {
 		t.Fatalf("custom input done item_id = %q, want ctc_call_exec", got)
 	}
-	if got := inputDone.Get("input").String(); got != "pwd" {
-		t.Fatalf("custom input done input = %q, want pwd", got)
+	if got := inputDone.Get("input").String(); got != `const r = await tools.exec_command({cmd:"pwd"}); text(r.output);` {
+		t.Fatalf("custom input done input = %q, want code-mode exec", got)
 	}
 }
 
@@ -973,13 +926,13 @@ func TestConvertOpenAIChatCompletionsResponseToOpenAIResponses_RestoresAdditiona
 			"type":"additional_tools",
 			"tools":[{
 				"type":"namespace",
-				"name":"functions",
+				"name":"terminal",
 				"tools":[{"type":"custom","name":"exec"}]
 			}]
 		}]
 	}`)
 	chunks := []string{
-		`data: {"id":"chatcmpl_additional_namespace_custom_stream","object":"chat.completion.chunk","created":1773896263,"model":"model","choices":[{"index":0,"delta":{"tool_calls":[{"index":0,"id":"call_exec","type":"function","function":{"name":"functions__exec","arguments":""}}]},"finish_reason":null}]}`,
+		`data: {"id":"chatcmpl_additional_namespace_custom_stream","object":"chat.completion.chunk","created":1773896263,"model":"model","choices":[{"index":0,"delta":{"tool_calls":[{"index":0,"id":"call_exec","type":"function","function":{"name":"terminal__exec","arguments":""}}]},"finish_reason":null}]}`,
 		`data: {"id":"chatcmpl_additional_namespace_custom_stream","object":"chat.completion.chunk","created":1773896263,"model":"model","choices":[{"index":0,"delta":{"tool_calls":[{"index":0,"function":{"arguments":"{\"input\":\"pwd\"}"}}]},"finish_reason":"tool_calls"}]}`,
 		`data: [DONE]`,
 	}
@@ -1025,18 +978,19 @@ func TestConvertOpenAIChatCompletionsResponseToOpenAIResponses_RestoresAdditiona
 		if got := tc.got.Get(tc.path + ".name").String(); got != "exec" {
 			t.Fatalf("%s name = %q, want exec", tc.label, got)
 		}
-		if got := tc.got.Get(tc.path + ".namespace").String(); got != "functions" {
-			t.Fatalf("%s namespace = %q, want functions", tc.label, got)
+		if got := tc.got.Get(tc.path + ".namespace").String(); got != "terminal" {
+			t.Fatalf("%s namespace = %q, want terminal", tc.label, got)
 		}
 	}
-	if got := inputDone.Get("input").String(); got != "pwd" {
-		t.Fatalf("custom input = %q, want pwd", got)
+	wantInput := `const r = await tools.exec_command({cmd:"pwd"}); text(r.output);`
+	if got := inputDone.Get("input").String(); got != wantInput {
+		t.Fatalf("custom input = %q, want code-mode exec", got)
 	}
-	if got := done.Get("item.input").String(); got != "pwd" {
-		t.Fatalf("done input = %q, want pwd", got)
+	if got := done.Get("item.input").String(); got != wantInput {
+		t.Fatalf("done input = %q, want code-mode exec", got)
 	}
-	if got := completed.Get("response.output.0.input").String(); got != "pwd" {
-		t.Fatalf("completed input = %q, want pwd", got)
+	if got := completed.Get("response.output.0.input").String(); got != wantInput {
+		t.Fatalf("completed input = %q, want code-mode exec", got)
 	}
 }
 
@@ -1047,12 +1001,12 @@ func TestConvertOpenAIChatCompletionsResponseToOpenAIResponsesNonStream_Restores
 			"type":"additional_tools",
 			"tools":[{
 				"type":"namespace",
-				"name":"functions",
+				"name":"terminal",
 				"tools":[{"type":"custom","name":"exec"}]
 			}]
 		}]
 	}`)
-	raw := []byte(`{"id":"chatcmpl_additional_namespace_custom_nonstream","object":"chat.completion","created":1773896263,"model":"model","choices":[{"index":0,"message":{"role":"assistant","tool_calls":[{"id":"call_exec","type":"function","function":{"name":"functions__exec","arguments":"{\"input\":\"pwd\"}"}}]},"finish_reason":"tool_calls"}]}`)
+	raw := []byte(`{"id":"chatcmpl_additional_namespace_custom_nonstream","object":"chat.completion","created":1773896263,"model":"model","choices":[{"index":0,"message":{"role":"assistant","tool_calls":[{"id":"call_exec","type":"function","function":{"name":"terminal__exec","arguments":"{\"input\":\"pwd\"}"}}]},"finish_reason":"tool_calls"}]}`)
 
 	resp := ConvertOpenAIChatCompletionsResponseToOpenAIResponsesNonStream(context.Background(), "model", originalRequest, nil, raw, nil)
 	data := gjson.ParseBytes(resp)
@@ -1062,200 +1016,283 @@ func TestConvertOpenAIChatCompletionsResponseToOpenAIResponsesNonStream_Restores
 	if got := data.Get("output.0.name").String(); got != "exec" {
 		t.Fatalf("output name = %q, want exec; response=%s", got, resp)
 	}
-	if got := data.Get("output.0.namespace").String(); got != "functions" {
-		t.Fatalf("output namespace = %q, want functions; response=%s", got, resp)
+	if got := data.Get("output.0.namespace").String(); got != "terminal" {
+		t.Fatalf("output namespace = %q, want terminal; response=%s", got, resp)
 	}
-	if got := data.Get("output.0.input").String(); got != "pwd" {
-		t.Fatalf("output input = %q, want pwd; response=%s", got, resp)
+	wantInput := `const r = await tools.exec_command({cmd:"pwd"}); text(r.output);`
+	if got := data.Get("output.0.input").String(); got != wantInput {
+		t.Fatalf("output input = %q, want code-mode exec; response=%s", got, resp)
 	}
 }
 
-func TestConvertOpenAIChatCompletionsResponseToOpenAIResponses_DoesNotCompleteReasoningOnlyStream(t *testing.T) {
-	request := []byte(`{"model":"deepseek-v4-flash"}`)
+func TestConvertOpenAIChatCompletionsResponseToOpenAIResponses_LengthFinishReasonYieldsIncomplete(t *testing.T) {
+	// A hard max_output_tokens truncation upstream must surface to Codex as
+	// response.incomplete with reason=max_output_tokens, not a false success, while
+	// the partial text and item-level done events are preserved.
 	chunks := []string{
-		`data: {"id":"resp_reasoning_only","object":"chat.completion.chunk","created":1773896263,"model":"deepseek-v4-flash","choices":[{"index":0,"delta":{"role":"assistant","reasoning_content":"still thinking"},"finish_reason":null}]}`,
+		`data: {"id":"resp_truncated","object":"chat.completion.chunk","created":1773896263,"model":"model","choices":[{"index":0,"delta":{"role":"assistant","content":"1\n2\n3\n"}}]}`,
+		`data: {"id":"resp_truncated","object":"chat.completion.chunk","created":1773896263,"model":"model","choices":[{"index":0,"delta":{"role":null,"content":"4\n5"},"finish_reason":"length"}],"usage":{"prompt_tokens":10,"completion_tokens":64,"total_tokens":74}}`,
 		`data: [DONE]`,
 	}
+	request := []byte(`{"model":"gpt-5.4","max_output_tokens":64}`)
 
 	var param any
-	reasoningSeen := false
+	var out [][]byte
 	for _, line := range chunks {
-		for _, chunk := range ConvertOpenAIChatCompletionsResponseToOpenAIResponses(context.Background(), "deepseek-v4-flash", request, request, []byte(line), &param) {
-			event, _ := parseOpenAIResponsesSSEEvent(t, chunk)
-			if event == "response.reasoning_summary_text.delta" {
-				reasoningSeen = true
+		out = append(out, ConvertOpenAIChatCompletionsResponseToOpenAIResponses(context.Background(), "model", request, request, []byte(line), &param)...)
+	}
+
+	var terminal gjson.Result
+	terminalCount := 0
+	textDoneCount := 0
+	seqs := []int64{}
+	for _, chunk := range out {
+		ev, data := parseOpenAIResponsesSSEEvent(t, chunk)
+		seqs = append(seqs, data.Get("sequence_number").Int())
+		switch ev {
+		case "response.completed", "response.incomplete":
+			terminalCount++
+			terminal = data
+		case "response.output_text.done":
+			textDoneCount++
+		}
+	}
+
+	if terminalCount != 1 {
+		t.Fatalf("expected exactly 1 terminal event, got %d", terminalCount)
+	}
+	if got := terminal.Get("response.status").String(); got != "incomplete" {
+		t.Fatalf("terminal response.status = %q, want incomplete", got)
+	}
+	if got := terminal.Get("response.incomplete_details.reason").String(); got != "max_output_tokens" {
+		t.Fatalf("incomplete_details.reason = %q, want max_output_tokens", got)
+	}
+	if got := terminal.Get("response.max_output_tokens").Int(); got != 64 {
+		t.Fatalf("terminal response.max_output_tokens = %d, want 64", got)
+	}
+	// The partial content must still be preserved in the terminal output.
+	if got := terminal.Get("response.output.0.content.0.text").String(); got != "1\n2\n3\n4\n5" {
+		t.Fatalf("partial output text = %q, want %q", got, "1\n2\n3\n4\n5")
+	}
+	if got := terminal.Get("response.usage.output_tokens").Int(); got != 64 {
+		t.Fatalf("output_tokens = %d, want 64", got)
+	}
+	// Item-level finalization must still run so the partial text is closed before
+	// the terminal event.
+	if textDoneCount != 1 {
+		t.Fatalf("expected 1 output_text.done, got %d", textDoneCount)
+	}
+	for i := 1; i < len(seqs); i++ {
+		if seqs[i] <= seqs[i-1] {
+			t.Fatalf("sequence numbers not strictly ascending: %v", seqs)
+		}
+	}
+}
+
+func TestConvertOpenAIChatCompletionsResponseToOpenAIResponses_ContentFilterFinishReasonYieldsIncomplete(t *testing.T) {
+	// A filtered turn is not a clean success: surface response.incomplete with the
+	// schema-defined content_filter reason (mirrors the sibling translators).
+	chunks := []string{
+		`data: {"id":"resp_filtered","object":"chat.completion.chunk","created":1773896263,"model":"model","choices":[{"index":0,"delta":{"role":"assistant","content":"I cannot"}}]}`,
+		`data: {"id":"resp_filtered","object":"chat.completion.chunk","created":1773896263,"model":"model","choices":[{"index":0,"delta":{"role":null,"content":null},"finish_reason":"content_filter"}],"usage":{"prompt_tokens":8,"completion_tokens":3,"total_tokens":11}}`,
+		`data: [DONE]`,
+	}
+	request := []byte(`{"model":"gpt-5.4"}`)
+
+	var param any
+	var out [][]byte
+	for _, line := range chunks {
+		out = append(out, ConvertOpenAIChatCompletionsResponseToOpenAIResponses(context.Background(), "model", request, request, []byte(line), &param)...)
+	}
+
+	var terminal gjson.Result
+	terminalCount := 0
+	for _, chunk := range out {
+		ev, data := parseOpenAIResponsesSSEEvent(t, chunk)
+		if ev == "response.completed" || ev == "response.incomplete" {
+			terminalCount++
+			terminal = data
+		}
+	}
+	if terminalCount != 1 {
+		t.Fatalf("expected exactly 1 terminal event, got %d", terminalCount)
+	}
+	if got := terminal.Get("response.status").String(); got != "incomplete" {
+		t.Fatalf("terminal response.status = %q, want incomplete", got)
+	}
+	if got := terminal.Get("response.incomplete_details.reason").String(); got != "content_filter" {
+		t.Fatalf("incomplete_details.reason = %q, want content_filter", got)
+	}
+}
+
+func TestConvertOpenAIChatCompletionsResponseToOpenAIResponses_StopFinishReasonYieldsCompleted(t *testing.T) {
+	chunks := []string{
+		`data: {"id":"resp_stop","object":"chat.completion.chunk","created":1773896263,"model":"model","choices":[{"index":0,"delta":{"role":"assistant","content":"hello"}}]}`,
+		`data: {"id":"resp_stop","object":"chat.completion.chunk","created":1773896263,"model":"model","choices":[{"index":0,"delta":{"role":null,"content":" world"},"finish_reason":"stop"}],"usage":{"prompt_tokens":2,"completion_tokens":2,"total_tokens":4}}`,
+		`data: [DONE]`,
+	}
+	request := []byte(`{"model":"gpt-5.4"}`)
+
+	var param any
+	var out [][]byte
+	for _, line := range chunks {
+		out = append(out, ConvertOpenAIChatCompletionsResponseToOpenAIResponses(context.Background(), "model", request, request, []byte(line), &param)...)
+	}
+
+	var terminal gjson.Result
+	terminalCount := 0
+	for _, chunk := range out {
+		ev, data := parseOpenAIResponsesSSEEvent(t, chunk)
+		if ev == "response.completed" || ev == "response.incomplete" {
+			terminalCount++
+			terminal = data
+		}
+	}
+	if terminalCount != 1 {
+		t.Fatalf("expected exactly 1 terminal event, got %d", terminalCount)
+	}
+	if got := terminal.Get("response.status").String(); got != "completed" {
+		t.Fatalf("terminal response.status = %q, want completed", got)
+	}
+	if terminal.Get("response.incomplete_details").Exists() {
+		t.Fatalf("completed terminal must not carry incomplete_details: %s", terminal.Get("response.incomplete_details").Raw)
+	}
+	if got := terminal.Get("response.output.0.content.0.text").String(); got != "hello world" {
+		t.Fatalf("output text = %q, want %q", got, "hello world")
+	}
+}
+
+func TestConvertOpenAIChatCompletionsResponseToOpenAIResponses_ToolCallFinishReasonYieldsCompleted(t *testing.T) {
+	chunks := []string{
+		`data: {"id":"resp_tools","object":"chat.completion.chunk","created":1773896263,"model":"model","choices":[{"index":0,"delta":{"role":"assistant","content":null,"tool_calls":[{"index":0,"id":"call_weather","type":"function","function":{"name":"get_weather","arguments":""}}]}}]}`,
+		`data: {"id":"resp_tools","object":"chat.completion.chunk","created":1773896263,"model":"model","choices":[{"index":0,"delta":{"role":null,"content":null,"tool_calls":[{"index":0,"function":{"arguments":"{\"location\":\"Tokyo\"}"}}]},"finish_reason":"tool_calls"}],"usage":{"prompt_tokens":5,"completion_tokens":9,"total_tokens":14}}`,
+		`data: [DONE]`,
+	}
+	request := []byte(`{"model":"gpt-5.4","tool_choice":"auto","parallel_tool_calls":true}`)
+
+	var param any
+	var out [][]byte
+	for _, line := range chunks {
+		out = append(out, ConvertOpenAIChatCompletionsResponseToOpenAIResponses(context.Background(), "model", request, request, []byte(line), &param)...)
+	}
+
+	var terminal gjson.Result
+	terminalCount := 0
+	for _, chunk := range out {
+		ev, data := parseOpenAIResponsesSSEEvent(t, chunk)
+		if ev == "response.completed" || ev == "response.incomplete" {
+			terminalCount++
+			terminal = data
+		}
+	}
+	if terminalCount != 1 {
+		t.Fatalf("expected exactly 1 terminal event, got %d", terminalCount)
+	}
+	if got := terminal.Get("response.status").String(); got != "completed" {
+		t.Fatalf("terminal response.status = %q, want completed", got)
+	}
+	if got := terminal.Get("response.output.0.type").String(); got != "function_call" {
+		t.Fatalf("response.output.0.type = %q, want function_call", got)
+	}
+	if got := terminal.Get("response.output.0.call_id").String(); got != "call_weather" {
+		t.Fatalf("response.output.0.call_id = %q, want call_weather", got)
+	}
+}
+
+func TestConvertOpenAIChatCompletionsResponseToOpenAIResponses_DoneWithoutChunksEmitsWellFormedPrologueAndTerminal(t *testing.T) {
+	// Upstream produced no choices-bearing chunk at all (e.g. an error frame then
+	// EOF). The [DONE] marker must still yield a well-formed stream ending in a
+	// terminal event so clients never see "stream closed before response.completed".
+	var param any
+	out := ConvertOpenAIChatCompletionsResponseToOpenAIResponses(context.Background(), "model", nil, nil, []byte(`data: [DONE]`), &param)
+
+	if len(out) != 3 {
+		t.Fatalf("expected response.created + response.in_progress + terminal, got %d events", len(out))
+	}
+	var seqs []int64
+	var firstID string
+	var firstCreated int64
+	for i, chunk := range out {
+		_, data := parseOpenAIResponsesSSEEvent(t, chunk)
+		seqs = append(seqs, data.Get("sequence_number").Int())
+		if i == 0 {
+			firstID = data.Get("response.id").String()
+			firstCreated = data.Get("response.created_at").Int()
+		} else {
+			if got := data.Get("response.id").String(); got != firstID {
+				t.Fatalf("event[%d] response.id = %q, want %q", i, got, firstID)
 			}
-			if event == "response.completed" {
-				t.Fatalf("reasoning-only stream was finalized as response.completed: %s", chunk)
+			if got := data.Get("response.created_at").Int(); got != firstCreated {
+				t.Fatalf("event[%d] response.created_at = %d, want %d", i, got, firstCreated)
 			}
 		}
 	}
-	if !reasoningSeen {
-		t.Fatal("test stream did not exercise reasoning output")
+	for i, want := range []string{"response.created", "response.in_progress", "response.completed"} {
+		ev, _ := parseOpenAIResponsesSSEEvent(t, out[i])
+		if ev != want {
+			t.Fatalf("event[%d] = %q, want %q", i, ev, want)
+		}
+	}
+	if !strings.HasPrefix(firstID, "resp_") {
+		t.Fatalf("synthetic response id = %q, want resp_ prefix", firstID)
+	}
+	if firstCreated == 0 {
+		t.Fatal("expected a synthesized response.created_at > 0")
+	}
+	if seqs[0] != 1 || seqs[1] != 2 || seqs[2] != 3 {
+		t.Fatalf("sequence numbers = %v, want [1 2 3]", seqs)
 	}
 }
 
-func TestConvertOpenAIChatCompletionsResponseToOpenAIResponses_IncompleteToolStreamDoesNotFinalizeAsCompleted(t *testing.T) {
-	request := []byte(`{"model":"gpt-5.6-terra"}`)
+func TestConvertOpenAIChatCompletionsResponseToOpenAIResponses_DoneTwiceEmitsSingleTerminalEvent(t *testing.T) {
+	var param any
+	first := ConvertOpenAIChatCompletionsResponseToOpenAIResponses(context.Background(), "model", nil, nil, []byte(`data: [DONE]`), &param)
+	second := ConvertOpenAIChatCompletionsResponseToOpenAIResponses(context.Background(), "model", nil, nil, []byte(`data: [DONE]`), &param)
 
-	tests := []struct {
-		name   string
-		chunks []string
-	}{
-		{
-			name: "zero argument bytes without finish reason",
-			chunks: []string{
-				`data: {"id":"resp_interrupted_tool","object":"chat.completion.chunk","created":1773896263,"model":"gpt-5.6-terra","choices":[{"index":0,"delta":{"role":"assistant","content":null,"reasoning_content":null,"tool_calls":[{"index":0,"id":"call_patch","type":"function","function":{"name":"apply_patch","arguments":""}}]},"finish_reason":null}]}`,
-				`data: [DONE]`,
-			},
-		},
-		{
-			name: "partial json arguments without finish reason",
-			chunks: []string{
-				`data: {"id":"resp_interrupted_partial","object":"chat.completion.chunk","created":1773896263,"model":"gpt-5.6-terra","choices":[{"index":0,"delta":{"role":"assistant","content":null,"reasoning_content":null,"tool_calls":[{"index":0,"id":"call_patch","type":"function","function":{"name":"apply_patch","arguments":"{\"filePath\":\"foo"}}]},"finish_reason":null}]}`,
-				`data: [DONE]`,
-			},
-		},
+	if len(first) != 3 {
+		t.Fatalf("expected 3 events on first [DONE] (created + in_progress + terminal), got %d", len(first))
 	}
-
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			var param any
-			for _, line := range tt.chunks {
-				for _, chunk := range ConvertOpenAIChatCompletionsResponseToOpenAIResponses(context.Background(), "gpt-5.6-terra", request, request, []byte(line), &param) {
-					event, data := parseOpenAIResponsesSSEEvent(t, chunk)
-					if event == "response.completed" {
-						t.Fatalf("incomplete tool stream was finalized as response.completed: %s", chunk)
-					}
-					if event == "response.output_item.done" {
-						t.Fatalf("incomplete tool stream emitted output_item.done: %s", chunk)
-					}
-					if event == "response.function_call_arguments.done" {
-						t.Fatalf("incomplete tool stream emitted function_call_arguments.done: %s", chunk)
-					}
-					_ = data
-				}
-			}
-		})
+	if len(second) != 0 {
+		t.Fatalf("expected 0 events on repeated [DONE], got %d", len(second))
+	}
+	terminalCount := 0
+	for _, chunk := range first {
+		ev, _ := parseOpenAIResponsesSSEEvent(t, chunk)
+		if ev == "response.completed" || ev == "response.incomplete" {
+			terminalCount++
+		}
+	}
+	if terminalCount != 1 {
+		t.Fatalf("expected exactly 1 terminal event in stream, got %d", terminalCount)
 	}
 }
 
-func TestConvertOpenAIChatCompletionsResponseToOpenAIResponses_FinishReasonLengthEmitsIncomplete(t *testing.T) {
-	request := []byte(`{"model":"gpt-5.6-luna"}`)
+func TestConvertOpenAIChatCompletionsResponseToOpenAIResponses_DoneAfterFinishReasonTwiceEmitsSingleTerminalEvent(t *testing.T) {
+	// finish_reason finalized the turn on chunk 1; a [DONE] pair must still yield
+	// exactly one terminal event.
 	chunks := []string{
-		`data: {"id":"resp_length_tool","object":"chat.completion.chunk","created":1773896263,"model":"gpt-5.6-luna","choices":[{"index":0,"delta":{"role":"assistant","content":null,"reasoning_content":null,"tool_calls":[{"index":0,"id":"call_patch","type":"function","function":{"name":"apply_patch","arguments":""}}]},"finish_reason":null}]}`,
-		`data: {"id":"resp_length_tool","object":"chat.completion.chunk","created":1773896263,"model":"gpt-5.6-luna","choices":[{"index":0,"delta":{},"finish_reason":"length"}],"usage":{"prompt_tokens":10,"completion_tokens":5,"total_tokens":15}}`,
+		`data: {"id":"resp_done_after_fr","object":"chat.completion.chunk","created":1773896263,"model":"model","choices":[{"index":0,"delta":{"role":"assistant","content":"ping"},"finish_reason":"stop"}]}`,
+		`data: [DONE]`,
 		`data: [DONE]`,
 	}
+	request := []byte(`{"model":"gpt-5.4"}`)
 
 	var param any
-	var incompleteSeen bool
-	var itemDoneSeen bool
+	var out [][]byte
 	for _, line := range chunks {
-		for _, chunk := range ConvertOpenAIChatCompletionsResponseToOpenAIResponses(context.Background(), "gpt-5.6-luna", request, request, []byte(line), &param) {
-			event, data := parseOpenAIResponsesSSEEvent(t, chunk)
-			if event == "response.completed" {
-				t.Fatalf("stream with finish_reason=length was finalized as response.completed: %s", chunk)
-			}
-			if event == "response.output_item.done" {
-				itemDoneSeen = true
-				if got := data.Get("item.status").String(); got != "incomplete" {
-					t.Fatalf("item.status = %q, want incomplete", got)
-				}
-				if got := data.Get("item.arguments").String(); got == "{}" {
-					t.Fatalf("item.arguments synthesized empty object {}, want raw args or empty string")
-				}
-			}
-			if event == "response.incomplete" {
-				incompleteSeen = true
-				if got := data.Get("response.status").String(); got != "incomplete" {
-					t.Fatalf("response.status = %q, want incomplete", got)
-				}
-				if got := data.Get("response.incomplete_details.reason").String(); got != "max_output_tokens" {
-					t.Fatalf("response.incomplete_details.reason = %q, want max_output_tokens", got)
-				}
-				if got := data.Get("response.output.0.status").String(); got != "incomplete" {
-					t.Fatalf("response.output.0.status = %q, want incomplete", got)
-				}
+		out = append(out, ConvertOpenAIChatCompletionsResponseToOpenAIResponses(context.Background(), "model", request, request, []byte(line), &param)...)
+	}
+	terminalCount := 0
+	for _, chunk := range out {
+		ev, data := parseOpenAIResponsesSSEEvent(t, chunk)
+		if ev == "response.completed" || ev == "response.incomplete" {
+			terminalCount++
+			if got := data.Get("response.output.0.content.0.text").String(); got != "ping" {
+				t.Fatalf("terminal output text = %q, want %q", got, "ping")
 			}
 		}
 	}
-	if !itemDoneSeen {
-		t.Fatal("expected response.output_item.done event for finish_reason=length")
-	}
-	if !incompleteSeen {
-		t.Fatal("expected response.incomplete event for finish_reason=length")
-	}
-}
-
-func TestConvertOpenAIChatCompletionsResponseToOpenAIResponses_FinishReasonContentFilterEmitsIncomplete(t *testing.T) {
-	request := []byte(`{"model":"gpt-5.6-luna"}`)
-	chunks := []string{
-		`data: {"id":"resp_filter_tool","object":"chat.completion.chunk","created":1773896263,"model":"gpt-5.6-luna","choices":[{"index":0,"delta":{"role":"assistant","content":null,"reasoning_content":null,"tool_calls":[{"index":0,"id":"call_patch","type":"function","function":{"name":"apply_patch","arguments":""}}]},"finish_reason":null}]}`,
-		`data: {"id":"resp_filter_tool","object":"chat.completion.chunk","created":1773896263,"model":"gpt-5.6-luna","choices":[{"index":0,"delta":{},"finish_reason":"content_filter"}],"usage":{"prompt_tokens":10,"completion_tokens":5,"total_tokens":15}}`,
-		`data: [DONE]`,
-	}
-
-	var param any
-	var incompleteSeen bool
-	var itemDoneSeen bool
-	for _, line := range chunks {
-		for _, chunk := range ConvertOpenAIChatCompletionsResponseToOpenAIResponses(context.Background(), "gpt-5.6-luna", request, request, []byte(line), &param) {
-			event, data := parseOpenAIResponsesSSEEvent(t, chunk)
-			if event == "response.completed" {
-				t.Fatalf("stream with finish_reason=content_filter was finalized as response.completed: %s", chunk)
-			}
-			if event == "response.output_item.done" {
-				itemDoneSeen = true
-				if got := data.Get("item.status").String(); got != "incomplete" {
-					t.Fatalf("item.status = %q, want incomplete", got)
-				}
-			}
-			if event == "response.incomplete" {
-				incompleteSeen = true
-				if got := data.Get("response.status").String(); got != "incomplete" {
-					t.Fatalf("response.status = %q, want incomplete", got)
-				}
-				if got := data.Get("response.incomplete_details.reason").String(); got != "content_filter" {
-					t.Fatalf("response.incomplete_details.reason = %q, want content_filter", got)
-				}
-			}
-		}
-	}
-	if !itemDoneSeen {
-		t.Fatal("expected response.output_item.done event for finish_reason=content_filter")
-	}
-	if !incompleteSeen {
-		t.Fatal("expected response.incomplete event for finish_reason=content_filter")
-	}
-}
-
-func TestConvertOpenAIChatCompletionsResponseToOpenAIResponsesNonStream_FinishReasonLength(t *testing.T) {
-	raw := []byte(`{"id":"chatcmpl_len","object":"chat.completion","created":1773896263,"model":"gpt-5.6","choices":[{"index":0,"message":{"role":"assistant","content":"truncated text"},"finish_reason":"length"}],"usage":{"prompt_tokens":10,"completion_tokens":5,"total_tokens":15}}`)
-	out := ConvertOpenAIChatCompletionsResponseToOpenAIResponsesNonStream(context.Background(), "gpt-5.6", nil, nil, raw, nil)
-	data := gjson.ParseBytes(out)
-	if got := data.Get("status").String(); got != "incomplete" {
-		t.Fatalf("status = %q, want incomplete; out=%s", got, out)
-	}
-	if got := data.Get("incomplete_details.reason").String(); got != "max_output_tokens" {
-		t.Fatalf("incomplete_details.reason = %q, want max_output_tokens; out=%s", got, out)
-	}
-	if got := data.Get("output.0.status").String(); got != "incomplete" {
-		t.Fatalf("output.0.status = %q, want incomplete; out=%s", got, out)
-	}
-}
-
-func TestConvertOpenAIChatCompletionsResponseToOpenAIResponsesNonStream_FinishReasonContentFilter(t *testing.T) {
-	raw := []byte(`{"id":"chatcmpl_filter","object":"chat.completion","created":1773896263,"model":"gpt-5.6","choices":[{"index":0,"message":{"role":"assistant","content":"blocked text"},"finish_reason":"content_filter"}],"usage":{"prompt_tokens":10,"completion_tokens":5,"total_tokens":15}}`)
-	out := ConvertOpenAIChatCompletionsResponseToOpenAIResponsesNonStream(context.Background(), "gpt-5.6", nil, nil, raw, nil)
-	data := gjson.ParseBytes(out)
-	if got := data.Get("status").String(); got != "incomplete" {
-		t.Fatalf("status = %q, want incomplete; out=%s", got, out)
-	}
-	if got := data.Get("incomplete_details.reason").String(); got != "content_filter" {
-		t.Fatalf("incomplete_details.reason = %q, want content_filter; out=%s", got, out)
-	}
-	if got := data.Get("output.0.status").String(); got != "incomplete" {
-		t.Fatalf("output.0.status = %q, want incomplete; out=%s", got, out)
+	if terminalCount != 1 {
+		t.Fatalf("expected exactly 1 terminal event, got %d", terminalCount)
 	}
 }

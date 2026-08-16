@@ -178,7 +178,7 @@ func convertClaudeRequestToOpenAI(modelName string, inputRawJSON []byte, stream 
 					case "thinking":
 						// Only map thinking to reasoning_content for assistant messages (security: prevent injection)
 						if role == "assistant" {
-							if !shouldMapClaudeThinkingToGPTReasoning(part, preserveThinkingBlocks) {
+							if !shouldMapClaudeThinkingToGPTReasoning(modelName, part, preserveThinkingBlocks) {
 								return true
 							}
 							thinkingText := thinking.GetThinkingText(part)
@@ -373,9 +373,9 @@ func normalizeObjectSchemaProperties(schema any) any {
 	}
 }
 
-func shouldMapClaudeThinkingToGPTReasoning(part gjson.Result, preserveThinkingBlocks ...bool) bool {
+func shouldMapClaudeThinkingToGPTReasoning(modelName string, part gjson.Result, preserveThinkingBlocks ...bool) bool {
 	preserveThinking := len(preserveThinkingBlocks) > 0 && preserveThinkingBlocks[0]
-	if preserveThinking {
+	if preserveThinking || isDeepSeekReasoningReplayModel(modelName) {
 		return true
 	}
 
@@ -385,6 +385,20 @@ func shouldMapClaudeThinkingToGPTReasoning(part gjson.Result, preserveThinkingBl
 	}
 	_, ok := sigcompat.CompatibleSignatureForProvider(sigcompat.SignatureProviderGPT, signature.String())
 	return ok
+}
+
+func isDeepSeekReasoningReplayModel(modelName string) bool {
+	modelName = strings.ToLower(strings.TrimSpace(modelName))
+	if open := strings.LastIndex(modelName, "("); open >= 0 && strings.HasSuffix(modelName, ")") {
+		modelName = strings.TrimSpace(modelName[:open])
+	}
+
+	switch modelName {
+	case "deepseek-v4-flash-free", "opencode/deepseek-v4-flash-free":
+		return true
+	default:
+		return false
+	}
 }
 
 func convertClaudeContentPart(part gjson.Result) (string, bool) {

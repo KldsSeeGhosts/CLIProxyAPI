@@ -72,6 +72,44 @@ func GetCodexProModels() []*ModelInfo {
 	return WithCodexBuiltins(cloneModelInfos(getModels().CodexPro))
 }
 
+// GetCodexCatalogModels returns the union of every Codex plan tier plus builtins.
+// Routing uses this snapshot so a single plan-tier refresh cannot hide a model
+// that another still-valid Codex catalog still advertises.
+func GetCodexCatalogModels() []*ModelInfo {
+	data := getModels()
+	return WithCodexBuiltins(mergeModelInfos(
+		cloneModelInfos(data.CodexFree),
+		cloneModelInfos(data.CodexTeam),
+		cloneModelInfos(data.CodexPlus),
+		cloneModelInfos(data.CodexPro),
+	))
+}
+
+func mergeModelInfos(sections ...[]*ModelInfo) []*ModelInfo {
+	seen := make(map[string]struct{})
+	out := make([]*ModelInfo, 0)
+	for _, section := range sections {
+		for _, model := range section {
+			if model == nil {
+				continue
+			}
+			id := strings.ToLower(strings.TrimSpace(model.ID))
+			if id == "" {
+				continue
+			}
+			if _, exists := seen[id]; exists {
+				continue
+			}
+			seen[id] = struct{}{}
+			out = append(out, cloneModelInfo(model))
+		}
+	}
+	if len(out) == 0 {
+		return nil
+	}
+	return out
+}
+
 // GetKimiModels returns the standard Kimi (Moonshot AI) model definitions.
 func GetKimiModels() []*ModelInfo {
 	return cloneModelInfos(getModels().Kimi)
@@ -324,8 +362,22 @@ func GetStaticModelDefinitionsByChannel(channel string) []*ModelInfo {
 		return GetAntigravityModels()
 	case "xai", "x-ai", "grok":
 		return GetXAIModels()
+	case "cursor":
+		return GetCursorModels()
 	default:
 		return nil
+	}
+}
+
+// GetCursorModels returns the fallback Cursor model definitions.
+func GetCursorModels() []*ModelInfo {
+	return []*ModelInfo{
+		{ID: "composer-2", Object: "model", OwnedBy: "cursor", Type: "cursor", DisplayName: "Composer 2", ContextLength: 200000, MaxCompletionTokens: 64000, Thinking: &ThinkingSupport{Max: 50000, DynamicAllowed: true}},
+		{ID: "claude-4-sonnet", Object: "model", OwnedBy: "cursor", Type: "cursor", DisplayName: "Claude 4 Sonnet", ContextLength: 200000, MaxCompletionTokens: 64000, Thinking: &ThinkingSupport{Max: 50000, DynamicAllowed: true}},
+		{ID: "claude-3.5-sonnet", Object: "model", OwnedBy: "cursor", Type: "cursor", DisplayName: "Claude 3.5 Sonnet", ContextLength: 200000, MaxCompletionTokens: 8192},
+		{ID: "gpt-4o", Object: "model", OwnedBy: "cursor", Type: "cursor", DisplayName: "GPT-4o", ContextLength: 128000, MaxCompletionTokens: 16384},
+		{ID: "cursor-small", Object: "model", OwnedBy: "cursor", Type: "cursor", DisplayName: "Cursor Small", ContextLength: 200000, MaxCompletionTokens: 64000},
+		{ID: "gemini-2.5-pro", Object: "model", OwnedBy: "cursor", Type: "cursor", DisplayName: "Gemini 2.5 Pro", ContextLength: 1000000, MaxCompletionTokens: 65536, Thinking: &ThinkingSupport{Max: 50000, DynamicAllowed: true}},
 	}
 }
 
@@ -346,6 +398,7 @@ func LookupStaticModelInfo(modelID string) *ModelInfo {
 		data.Kimi,
 		data.Antigravity,
 		data.XAI,
+		GetCursorModels(),
 	}
 	for _, models := range allModels {
 		for _, m := range models {

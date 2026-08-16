@@ -1248,6 +1248,9 @@ func (r *ModelRegistry) convertModelToMap(model *ModelInfo, handlerType string) 
 		if len(model.SupportedParameters) > 0 {
 			result["supported_parameters"] = append([]string(nil), model.SupportedParameters...)
 		}
+		if thinking := thinkingSupportMap(model.Thinking); thinking != nil {
+			result["thinking"] = thinking
+		}
 		return result
 
 	case "claude":
@@ -1275,6 +1278,9 @@ func (r *ModelRegistry) convertModelToMap(model *ModelInfo, handlerType string) 
 		}
 		result["max_input_tokens"] = maxInput
 		result["max_tokens"] = maxOutput
+		if thinking := thinkingSupportMap(model.Thinking); thinking != nil {
+			result["thinking"] = thinking
+		}
 		return result
 
 	case "gemini":
@@ -1325,8 +1331,37 @@ func (r *ModelRegistry) convertModelToMap(model *ModelInfo, handlerType string) 
 		if model.Created != 0 {
 			result["created"] = model.Created
 		}
+		if thinking := thinkingSupportMap(model.Thinking); thinking != nil {
+			result["thinking"] = thinking
+		}
 		return result
 	}
+}
+
+func thinkingSupportMap(support *ThinkingSupport) map[string]any {
+	if support == nil {
+		return nil
+	}
+	result := make(map[string]any)
+	if support.Min != 0 {
+		result["min"] = support.Min
+	}
+	if support.Max != 0 {
+		result["max"] = support.Max
+	}
+	if support.ZeroAllowed {
+		result["zero_allowed"] = true
+	}
+	if support.DynamicAllowed {
+		result["dynamic_allowed"] = true
+	}
+	if len(support.Levels) > 0 {
+		result["levels"] = append([]string(nil), support.Levels...)
+	}
+	if len(result) == 0 {
+		return nil
+	}
+	return result
 }
 
 // CleanupExpiredQuotas removes expired quota tracking entries

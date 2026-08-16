@@ -34,6 +34,7 @@ func TestManager_MarkResult_ConnectionLifecycleDoesNotCooldown(t *testing.T) {
 		{name: "unexpected EOF", err: &Error{Message: "unexpected EOF"}},
 		{name: "plain EOF", err: &Error{Message: "EOF"}},
 		{name: "wrapped unexpected EOF", err: &Error{Message: "read tcp 127.0.0.1:1->127.0.0.1:2: unexpected EOF"}},
+		{name: "pre-header connection timeout", err: &Error{HTTPStatus: http.StatusServiceUnavailable, Message: "upstream connect error or disconnect/reset before headers. reset reason: connection timeout"}},
 		{name: "typed canceled", err: resultErrorFromError(context.Canceled)},
 		{name: "typed deadline", err: resultErrorFromError(context.DeadlineExceeded)},
 		{name: "url canceled", err: resultErrorFromError(&url.Error{Op: "Post", URL: "https://example.com", Err: context.Canceled})},
@@ -252,6 +253,7 @@ func TestIsConnectionLifecycleError_StatusBearingErrorsStayCoolable(t *testing.T
 		&statusBearingError{status: http.StatusTooManyRequests, msg: "context canceled"},
 		&statusBearingError{status: http.StatusInternalServerError, msg: "unexpected EOF"},
 		&statusBearingError{status: http.StatusBadGateway, msg: "websocket: close 1006 (abnormal closure): unexpected EOF"},
+		&statusBearingError{status: http.StatusServiceUnavailable, msg: "connection timeout"},
 	}
 	for _, err := range cases {
 		if isConnectionLifecycleError(err) {
@@ -261,6 +263,26 @@ func TestIsConnectionLifecycleError_StatusBearingErrorsStayCoolable(t *testing.T
 		if shouldSkipCredentialCooldown(got) {
 			t.Fatalf("shouldSkipCredentialCooldown(%#v) = true, want false", got)
 		}
+	}
+}
+
+func TestIsConnectionLifecycleError_PreHeaderTimeoutWinsOver503(t *testing.T) {
+	err := &statusBearingError{
+		status: http.StatusServiceUnavailable,
+		msg:    "upstream connect error or disconnect/reset before headers. reset reason: connection timeout",
+	}
+	if !isConnectionLifecycleError(err) {
+		t.Fatal("pre-header connection timeout should be a connection lifecycle error")
+	}
+	got := resultErrorFromError(err)
+	if got.Code != connectionLifecycleErrorCode {
+		t.Fatalf("code = %q, want %q", got.Code, connectionLifecycleErrorCode)
+	}
+	if got.HTTPStatus != http.StatusServiceUnavailable {
+		t.Fatalf("HTTP status = %d, want %d", got.HTTPStatus, http.StatusServiceUnavailable)
+	}
+	if !shouldSkipCredentialCooldown(got) {
+		t.Fatalf("shouldSkipCredentialCooldown(%#v) = false, want true", got)
 	}
 }
 

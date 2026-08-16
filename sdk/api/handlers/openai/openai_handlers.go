@@ -67,7 +67,8 @@ func (h *OpenAIAPIHandler) OpenAIModels(c *gin.Context) {
 	// Get all available models
 	allModels := h.Models()
 
-	// Filter to only include the 4 required fields: id, object, created, owned_by
+	// Keep the OpenAI-required fields, plus thinking.levels so harnesses that
+	// discover from /v1/models can offer discrete reasoning pickers (Grok 4.6).
 	filteredModels := make([]map[string]any, len(allModels))
 	for i, model := range allModels {
 		filteredModel := map[string]any{
@@ -75,14 +76,15 @@ func (h *OpenAIAPIHandler) OpenAIModels(c *gin.Context) {
 			"object": model["object"],
 		}
 
-		// Add created field if it exists
 		if created, exists := model["created"]; exists {
 			filteredModel["created"] = created
 		}
 
-		// Add owned_by field if it exists
 		if ownedBy, exists := model["owned_by"]; exists {
 			filteredModel["owned_by"] = ownedBy
+		}
+		if thinking, exists := model["thinking"]; exists {
+			filteredModel["thinking"] = thinking
 		}
 
 		filteredModels[i] = filteredModel

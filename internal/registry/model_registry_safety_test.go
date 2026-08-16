@@ -110,6 +110,38 @@ func TestCleanupExpiredQuotasInvalidatesAvailableModelsCache(t *testing.T) {
 	}
 }
 
+func TestGetAvailableModelsReturnsClonedThinkingLevels(t *testing.T) {
+	r := newTestModelRegistry()
+	r.RegisterClient("client-1", "openai", []*ModelInfo{{
+		ID:       "cursor-grok-4.6",
+		Thinking: &ThinkingSupport{Levels: []string{"low", "medium", "high", "xhigh"}},
+	}})
+
+	first := r.GetAvailableModels("openai")
+	if len(first) != 1 {
+		t.Fatalf("expected one model, got %d", len(first))
+	}
+	thinking, ok := first[0]["thinking"].(map[string]any)
+	if !ok {
+		t.Fatalf("expected thinking map, got %#v", first[0]["thinking"])
+	}
+	levels, ok := thinking["levels"].([]string)
+	if !ok || len(levels) != 4 || levels[3] != "xhigh" {
+		t.Fatalf("expected cloned thinking levels, got %#v", thinking["levels"])
+	}
+	levels[3] = "mutated"
+
+	second := r.GetAvailableModels("openai")
+	thinking, ok = second[0]["thinking"].(map[string]any)
+	if !ok {
+		t.Fatalf("second thinking = %#v", second[0]["thinking"])
+	}
+	levels, ok = thinking["levels"].([]string)
+	if !ok || len(levels) != 4 || levels[3] != "xhigh" {
+		t.Fatalf("thinking levels were not cloned: %#v", thinking["levels"])
+	}
+}
+
 func TestGetAvailableModelsReturnsClonedSupportedParameters(t *testing.T) {
 	r := newTestModelRegistry()
 	r.RegisterClient("client-1", "openai", []*ModelInfo{{

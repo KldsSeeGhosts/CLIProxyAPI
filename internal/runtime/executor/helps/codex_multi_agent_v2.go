@@ -125,3 +125,9 @@ func OptimizeCodexMultiAgentV2RequestForAuth(ctx context.Context, headers http.H
 func RestoreCodexMultiAgentV2Response(payload []byte, optimized bool) []byte {
 	return multiagentv2.RestoreCodexMultiAgentV2Response(payload, optimized)
 }
+
+// IsCodexClientRequest reports whether the request originates from the
+// official Codex client family, using the shared multi-agent client allowlist.
+func IsCodexClientRequest(ctx context.Context, headers http.Header) bool {
+	return multiagentv2.IsCodexClientRequest(ctx, headers)
+}

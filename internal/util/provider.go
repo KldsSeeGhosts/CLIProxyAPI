@@ -70,7 +70,71 @@ func GetProviderName(modelName string) []string {
 		return providers
 	}
 
+	// Pi/Codex send the virtual ID `cursor-grok-4.6` (and may still send a
+	// hidden per-effort SKU). Cursor's live catalog only has tiered IDs; the
+	// advertised registry keeps the virtual ID. Route the family through any
+	// registered Grok 4.6 name so the Cursor executor can remap effort/fast
+	// before the H2 call, or pass a suffixed SKU through.
+	for _, candidate := range cursorGrok46RoutingCandidates(modelName) {
+		for _, provider := range registry.GetGlobalRegistry().GetModelProviders(candidate) {
+			appendProvider(provider)
+		}
+		if len(providers) > 0 {
+			return providers
+		}
+	}
+
+	// Gemini 3.7 Flash uses the same virtual-ID pattern: harnesses select
+	// `gemini-3.7-flash`, Antigravity currently publishes `gemini-3.7-flash-high`,
+	// and later per-level SKUs stay hidden from discovery.
+	for _, candidate := range gemini37FlashRoutingCandidates(modelName) {
+		for _, provider := range registry.GetGlobalRegistry().GetModelProviders(candidate) {
+			appendProvider(provider)
+		}
+		if len(providers) > 0 {
+			return providers
+		}
+	}
+
 	return providers
+}
+
+func isCursorGrok46Family(modelName string) bool {
+	return modelName == "cursor-grok-4.6" || strings.HasPrefix(modelName, "cursor-grok-4.6-")
+}
+
+func cursorGrok46RoutingCandidates(modelName string) []string {
+	if !isCursorGrok46Family(modelName) {
+		return nil
+	}
+	return []string{
+		"cursor-grok-4.6",
+		"cursor-grok-4.6-high",
+		"cursor-grok-4.6-xhigh",
+		"cursor-grok-4.6-medium",
+		"cursor-grok-4.6-low",
+		"cursor-grok-4.6-high-fast",
+		"cursor-grok-4.6-xhigh-fast",
+		"cursor-grok-4.6-medium-fast",
+		"cursor-grok-4.6-low-fast",
+	}
+}
+
+func isGemini37FlashFamily(modelName string) bool {
+	return modelName == "gemini-3.7-flash" || strings.HasPrefix(modelName, "gemini-3.7-flash-")
+}
+
+func gemini37FlashRoutingCandidates(modelName string) []string {
+	if !isGemini37FlashFamily(modelName) {
+		return nil
+	}
+	return []string{
+		"gemini-3.7-flash",
+		"gemini-3.7-flash-high",
+		"gemini-3.7-flash-medium",
+		"gemini-3.7-flash-low",
+		"gemini-3.7-flash-minimal",
+	}
 }
 
 // ResolveAutoModel resolves the "auto" model name to an actual available model.

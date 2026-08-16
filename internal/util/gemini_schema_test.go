@@ -1085,6 +1085,21 @@ func TestCleanJSONSchemaForGemini_RemovesGeminiUnsupportedMetadataFields(t *test
 	compareJSON(t, expected, result)
 }
 
+func TestCleanJSONSchemaForGeminiRemovesEncryptedSchemaMetadata(t *testing.T) {
+	input := `{"type":"object","properties":{
+		"value":{"type":"string","encrypted":true},
+		"encrypted":{"type":"boolean","description":"property name should survive"}
+	}}`
+
+	result := gjson.Parse(CleanJSONSchemaForGemini(input))
+	if result.Get("properties.value.encrypted").Exists() {
+		t.Fatalf("encrypted schema metadata survived cleaning: %s", result.Raw)
+	}
+	if !result.Get("properties.encrypted").Exists() {
+		t.Fatalf("property named encrypted was removed: %s", result.Raw)
+	}
+}
+
 func TestRemoveExtensionFields(t *testing.T) {
 	tests := []struct {
 		name     string

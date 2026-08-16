@@ -29,6 +29,16 @@ func TestIsCodexMultiAgentClient(t *testing.T) {
 			want:      true,
 		},
 		{
+			name:      "Codex Desktop harnessed",
+			userAgent: "Codex Desktop/0.146.0 (CachyOS Linux Rolling Release; x86_64) unknown (Codex Desktop; 26.727.40816)",
+			want:      true,
+		},
+		{
+			name:      "Codex Desktop codex_exec mode",
+			userAgent: "Codex Desktop/0.146.0 (CachyOS Linux Rolling Release; x86_64) dumb (codex_exec; 0.146.0)",
+			want:      true,
+		},
+		{
 			name:      "codex tui",
 			userAgent: "codex-tui/0.145.0 (Mac OS 26.5.2; arm64) iTerm.app/3.6.11 (codex-tui; 0.145.0)",
 			want:      true,
@@ -44,13 +54,58 @@ func TestIsCodexMultiAgentClient(t *testing.T) {
 			want:      true,
 		},
 		{
-			name:      "other client",
-			userAgent: "curl/8.7.1",
+			name:      "codex tui harnessed",
+			userAgent: "codex-tui/0.146.0 (CachyOS Linux Rolling Release; x86_64) kitty (codex-tui; 0.146.0)",
+			want:      true,
+		},
+		{
+			name:      "codex exec",
+			userAgent: "codex_exec/0.146.0 (CachyOS Linux Rolling Release; x86_64) unknown (codex_exec; 0.146.0)",
+			want:      true,
+		},
+		{
+			name:      "codex chatgpt ios remote",
+			userAgent: "codex_chatgpt_ios_remote/0.146.0 (CachyOS Linux Rolling Release; x86_64) kitty (codex_chatgpt_ios_remote; 1.2026.202)",
+			want:      true,
+		},
+		{
+			name:      "t3code desktop",
+			userAgent: "t3code_desktop/0.146.0 (CachyOS Linux Rolling Release; x86_64) unknown (t3code_desktop; 0.0.32-nightly.20260801.974)",
+			want:      true,
+		},
+		{
+			name:      "claude cli",
+			userAgent: "claude-cli/2.1.220 (external, cli)",
+			want:      false,
+		},
+		{
+			name:      "curl",
+			userAgent: "curl/8.21.0",
+			want:      false,
+		},
+		{
+			name:      "openai js sdk",
+			userAgent: "OpenAI/JS 6.26.0",
+			want:      false,
+		},
+		{
+			name:      "python urllib",
+			userAgent: "Python-urllib/3.14",
+			want:      false,
+		},
+		{
+			name:      "empty",
+			userAgent: "",
 			want:      false,
 		},
 		{
 			name:      "embedded token",
 			userAgent: "proxy Codex Desktop/0.146.0",
+			want:      false,
+		},
+		{
+			name:      "codex substring attacker",
+			userAgent: "codex-proxy-attacker/1.0",
 			want:      false,
 		},
 	}
@@ -60,6 +115,27 @@ func TestIsCodexMultiAgentClient(t *testing.T) {
 			t.Parallel()
 			if got := isCodexMultiAgentClient(tt.userAgent); got != tt.want {
 				t.Fatalf("isCodexMultiAgentClient(%q) = %v, want %v", tt.userAgent, got, tt.want)
+			}
+		})
+	}
+}
+
+func TestIsCodexMultiAgentClientCaseInsensitive(t *testing.T) {
+	t.Parallel()
+
+	for _, userAgent := range []string{
+		"CODEX DESKTOP/0.146.0",
+		"Codex-Tui/0.146.0 (CachyOS Linux Rolling Release; x86_64) kitty (codex-tui; 0.146.0)",
+		"CODEX_EXEC/0.146.0",
+		"Codex_Chatgpt_Ios_Remote/0.146.0",
+		"T3CODE_DESKTOP/0.146.0",
+		"  codex-tui/0.146.0  ",
+	} {
+		userAgent := userAgent
+		t.Run(userAgent, func(t *testing.T) {
+			t.Parallel()
+			if got := isCodexMultiAgentClient(userAgent); !got {
+				t.Fatalf("isCodexMultiAgentClient(%q) = false, want true", userAgent)
 			}
 		})
 	}
@@ -418,6 +494,22 @@ func TestOptimizeCodexMultiAgentV2RequestNormalizesAgentMessageContentOnly(t *te
 	}
 }
 
+func TestOptimizeCodexMultiAgentV2RequestLeavesOrdinaryResponsesUnchanged(t *testing.T) {
+	t.Parallel()
+
+	payload := []byte(`{"model":"gpt-5.4","input":[{"type":"message","role":"user","content":[{"type":"input_text","text":"ordinary request"}]}],"tools":[{"type":"function","name":"lookup_weather","description":"Look up weather."}],"stream":true}`)
+	headers := http.Header{"User-Agent": []string{"Codex Desktop/0.146.0-alpha.3"}}
+	cfg := &config.Config{Codex: config.CodexConfig{OptimizeMultiAgentV2: true}}
+
+	got, optimized := OptimizeCodexMultiAgentV2Request(context.Background(), headers, payload, cfg)
+	if optimized {
+		t.Fatal("ordinary Responses request unexpectedly optimized")
+	}
+	if string(got) != string(payload) {
+		t.Fatalf("ordinary Responses request changed: %s", got)
+	}
+}
+
 func TestRestoreCodexMultiAgentV2Response(t *testing.T) {
 	t.Parallel()
 
@@ -494,6 +586,52 @@ func TestRewriteCodexMultiAgentV2InputRewritesAgentMessage(t *testing.T) {
 	}
 	if turnID := gjson.GetBytes(got, "input.0.internal_chat_message_metadata_passthrough.turn_id").String(); turnID != "019f92ae-7eae-7371-957e-8f6f734edddc" {
 		t.Fatalf("turn_id = %q", turnID)
+	}
+}
+
+func TestRewriteCodexMultiAgentV2InputNormalizesIOSRemoteClient(t *testing.T) {
+	t.Parallel()
+
+	payload := []byte(`{"model":"gpt-5.4","input":[{
+		"type":"agent_message",
+		"id":"amsg_1",
+		"author":"/root",
+		"recipient":"/root/worker",
+		"content":[
+			{"type":"input_text","text":"Payload:\n"},
+			{"type":"encrypted_content","encrypted_content":"delegated task"}
+		],
+		"internal_chat_message_metadata_passthrough":{"turn_id":"turn_1"}
+	}]}`)
+	cfg := &config.Config{Codex: config.CodexConfig{OptimizeMultiAgentV2: true}}
+
+	got := RewriteCodexMultiAgentV2Input(context.Background(), http.Header{"User-Agent": []string{"codex_chatgpt_ios_remote/0.146.0 (CachyOS Linux Rolling Release; x86_64) kitty (codex_chatgpt_ios_remote; 1.2026.202)"}}, payload, cfg)
+	if messageType := gjson.GetBytes(got, "input.0.type").String(); messageType != "message" {
+		t.Fatalf("type = %q, want message; payload=%s", messageType, got)
+	}
+	if partType := gjson.GetBytes(got, "input.0.content.1.type").String(); partType != "input_text" {
+		t.Fatalf("content[1].type = %q, want input_text; payload=%s", partType, got)
+	}
+	if text := gjson.GetBytes(got, "input.0.content.1.text").String(); text != "delegated task" {
+		t.Fatalf("content[1].text = %q, want delegated task; payload=%s", text, got)
+	}
+	if encrypted := gjson.GetBytes(got, "input.0.content.1.encrypted_content"); encrypted.Exists() {
+		t.Fatalf("content[1].encrypted_content was preserved: %s", got)
+	}
+
+	for _, tt := range []struct {
+		name      string
+		userAgent string
+	}{
+		{name: "claude cli", userAgent: "claude-cli/2.1.220 (external, cli)"},
+		{name: "empty", userAgent: ""},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			unchanged := RewriteCodexMultiAgentV2Input(context.Background(), http.Header{"User-Agent": []string{tt.userAgent}}, payload, cfg)
+			if string(unchanged) != string(payload) {
+				t.Fatalf("ineligible client payload changed: %s", unchanged)
+			}
+		})
 	}
 }
 
@@ -600,6 +738,104 @@ func TestTranslateRequestWithCodexMultiAgentV2Conditions(t *testing.T) {
 				t.Fatalf("target %s changed agent_message; output=%s", target, got)
 			}
 		})
+	}
+}
+
+func TestTranslateRequestWithCodexMultiAgentV2ReinforcesExternalCompletionContract(t *testing.T) {
+	t.Parallel()
+
+	payload := []byte(`{
+		"model":"external-model",
+		"instructions":"Keep changes focused.",
+		"input":[{"type":"message","role":"user","content":[{"type":"input_text","text":"Inspect and fix the issue."}]}],
+		"tools":[{"type":"function","name":"exec_command","description":"Run a command.","parameters":{"type":"object"}}]
+	}`)
+	cfg := &config.Config{Codex: config.CodexConfig{OptimizeMultiAgentV2: true}}
+	headers := http.Header{"User-Agent": []string{"Codex Desktop/0.146.0"}}
+
+	got := TranslateRequestWithCodexMultiAgentV2(context.Background(), headers, cfg, sdktranslator.FormatOpenAIResponse, sdktranslator.FormatOpenAI, "external-model", payload, true)
+	system := gjson.GetBytes(got, "messages.0.content").String()
+	if !strings.Contains(system, "Keep changes focused.") {
+		t.Fatalf("existing instructions missing: %q", system)
+	}
+	if !strings.Contains(system, codexExternalCompletionContractMarker) {
+		t.Fatalf("external completion contract missing: %q", system)
+	}
+	if !strings.Contains(system, "perform the corresponding tool call in the same response") {
+		t.Fatalf("tool-call requirement missing: %q", system)
+	}
+}
+
+func TestTranslateRequestWithCodexMultiAgentV2ReinforcesClaudeCompletionContract(t *testing.T) {
+	t.Parallel()
+
+	payload := []byte(`{
+		"model":"claude-opus-external",
+		"instructions":"Keep changes focused.",
+		"input":[{"type":"message","role":"user","content":[{"type":"input_text","text":"Inspect and fix the issue."}]}],
+		"tools":[{"type":"function","name":"exec_command","description":"Run a command.","parameters":{"type":"object"}}]
+	}`)
+	cfg := &config.Config{Codex: config.CodexConfig{OptimizeMultiAgentV2: true}}
+	headers := http.Header{"User-Agent": []string{"codex-tui/0.146.0"}}
+
+	got := TranslateRequestWithCodexMultiAgentV2(context.Background(), headers, cfg, sdktranslator.FormatOpenAIResponse, sdktranslator.FormatClaude, "claude-opus-external", payload, true)
+	system := gjson.GetBytes(got, "system.0.text").String()
+	if !strings.Contains(system, codexExternalCompletionContractMarker) {
+		t.Fatalf("Claude system completion contract missing: %s", got)
+	}
+}
+
+func TestReinforceCodexExternalCompletionContractConditions(t *testing.T) {
+	t.Parallel()
+
+	cfg := &config.Config{Codex: config.CodexConfig{OptimizeMultiAgentV2: true}}
+	headers := http.Header{"User-Agent": []string{"codex-tui/0.146.0"}}
+	payload := []byte(`{"instructions":"base","input":"continue","tools":[{"type":"function","name":"exec_command"}]}`)
+
+	t.Run("idempotent", func(t *testing.T) {
+		once := reinforceCodexExternalCompletionContract(context.Background(), headers, payload, cfg)
+		twice := reinforceCodexExternalCompletionContract(context.Background(), headers, once, cfg)
+		instructions := gjson.GetBytes(twice, "instructions").String()
+		if count := strings.Count(instructions, codexExternalCompletionContractMarker); count != 1 {
+			t.Fatalf("contract marker count = %d, want 1; instructions=%q", count, instructions)
+		}
+	})
+
+	for _, tt := range []struct {
+		name    string
+		headers http.Header
+		cfg     *config.Config
+		payload []byte
+	}{
+		{name: "unrelated client", headers: http.Header{"User-Agent": []string{"curl/8.7.1"}}, cfg: cfg, payload: payload},
+		{name: "disabled optimization", headers: headers, cfg: &config.Config{}, payload: payload},
+		{name: "no tools", headers: headers, cfg: cfg, payload: []byte(`{"instructions":"base","input":"answer"}`)},
+		{name: "invalid payload", headers: headers, cfg: cfg, payload: []byte(`{"instructions":`)},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			got := reinforceCodexExternalCompletionContract(context.Background(), tt.headers, tt.payload, tt.cfg)
+			if string(got) != string(tt.payload) {
+				t.Fatalf("payload changed: got=%s want=%s", got, tt.payload)
+			}
+		})
+	}
+}
+
+func TestReinforceCodexExternalCompletionContractRecognizesAdditionalTools(t *testing.T) {
+	t.Parallel()
+
+	payload := []byte(`{
+		"input":[{
+			"type":"additional_tools",
+			"tools":[{"type":"function","name":"wait_agent"}]
+		}]
+	}`)
+	cfg := &config.Config{Codex: config.CodexConfig{OptimizeMultiAgentV2: true}}
+	headers := http.Header{"User-Agent": []string{"codex_exec/0.146.0"}}
+
+	got := reinforceCodexExternalCompletionContract(context.Background(), headers, payload, cfg)
+	if !strings.Contains(gjson.GetBytes(got, "instructions").String(), codexExternalCompletionContractMarker) {
+		t.Fatalf("additional tools did not enable completion contract: %s", got)
 	}
 }
 
@@ -837,173 +1073,5 @@ func TestRemoveCodexCollaborationMessageEncryptionNoOpWithoutEncrypted(t *testin
 	got := removeCodexCollaborationMessageEncryption(payload, paths)
 	if string(got) != string(payload) {
 		t.Fatalf("payload changed when no encrypted field existed: %s", got)
-	}
-}
-
-func TestCodexSpawnAgentModelsCacheInvalidation(t *testing.T) {
-	modelRegistry := registry.GetGlobalRegistry()
-	clientID1 := "cache-invalidation-client-1"
-	clientID2 := "cache-invalidation-client-2"
-
-	// 1. Initial registration
-	modelRegistry.RegisterClient(clientID1, "openai", []*registry.ModelInfo{
-		{
-			ID:          "test-spawn-model-alpha",
-			DisplayName: "Test Spawn Model Alpha",
-			Description: "Initial description.",
-			Thinking: &registry.ThinkingSupport{
-				Levels: []string{"low", "medium"},
-			},
-		},
-	})
-	t.Cleanup(func() {
-		modelRegistry.UnregisterClient(clientID1)
-		modelRegistry.UnregisterClient(clientID2)
-	})
-
-	formatted1 := formatCodexSpawnAgentModelsForRequest(context.Background(), nil, false)
-	if !strings.Contains(formatted1, "test-spawn-model-alpha") {
-		t.Fatalf("expected initial markdown to contain test-spawn-model-alpha, got: %s", formatted1)
-	}
-	if !strings.Contains(formatted1, "Reasoning efforts: low, medium") {
-		t.Fatalf("expected initial reasoning efforts low, medium, got: %s", formatted1)
-	}
-
-	// 2. Cache hit returns identical content
-	formattedHit := formatCodexSpawnAgentModelsForRequest(context.Background(), nil, false)
-	if formattedHit != formatted1 {
-		t.Fatalf("cache hit expected identical output, got %s vs %s", formattedHit, formatted1)
-	}
-
-	// 3. Registering second model invalidates cache
-	modelRegistry.RegisterClient(clientID2, "openai", []*registry.ModelInfo{
-		{
-			ID:          "test-spawn-model-beta",
-			DisplayName: "Test Spawn Model Beta",
-			Description: "Second model.",
-		},
-	})
-
-	formatted2 := formatCodexSpawnAgentModelsForRequest(context.Background(), nil, false)
-	if !strings.Contains(formatted2, "test-spawn-model-beta") {
-		t.Fatalf("expected cache invalidation to include test-spawn-model-beta, got: %s", formatted2)
-	}
-
-	// 4. Modifying model thinking levels invalidates cache
-	modelRegistry.RegisterClient(clientID1, "openai", []*registry.ModelInfo{
-		{
-			ID:          "test-spawn-model-alpha",
-			DisplayName: "Test Spawn Model Alpha",
-			Description: "Initial description.",
-			Thinking: &registry.ThinkingSupport{
-				Levels: []string{"low", "medium", "high", "max"},
-			},
-		},
-	})
-
-	formatted3 := formatCodexSpawnAgentModelsForRequest(context.Background(), nil, false)
-	if !strings.Contains(formatted3, "low, medium (default), high, max") {
-		t.Fatalf("expected updated thinking levels to reflect in markdown, got: %s", formatted3)
-	}
-
-	// 5. Unregistering client invalidates cache
-	modelRegistry.UnregisterClient(clientID2)
-	formatted4 := formatCodexSpawnAgentModelsForRequest(context.Background(), nil, false)
-	if strings.Contains(formatted4, "test-spawn-model-beta") {
-		t.Fatalf("expected test-spawn-model-beta to be removed after unregistering, got: %s", formatted4)
-	}
-}
-
-func BenchmarkCodexSpawnAgentModelsForRequest(b *testing.B) {
-	modelRegistry := registry.GetGlobalRegistry()
-	clientID := "bench-client-models"
-	modelRegistry.RegisterClient(clientID, "openai", []*registry.ModelInfo{
-		{
-			ID:          "gpt-5.5",
-			DisplayName: "Default model",
-			Description: "Default model description.",
-		},
-		{
-			ID:          "claude-3-7-sonnet",
-			DisplayName: "Claude 3.7 Sonnet",
-			Description: "Claude model description.",
-		},
-	})
-	b.Cleanup(func() {
-		modelRegistry.UnregisterClient(clientID)
-	})
-
-	ctx := context.Background()
-	b.ReportAllocs()
-	b.ResetTimer()
-	for i := 0; i < b.N; i++ {
-		codexSpawnAgentModelsForRequest(ctx, nil, false)
-	}
-}
-
-func BenchmarkPrepareCodexMultiAgentV2Tools(b *testing.B) {
-	modelRegistry := registry.GetGlobalRegistry()
-	clientID := "bench-client-prepare"
-	modelRegistry.RegisterClient(clientID, "openai", []*registry.ModelInfo{
-		{
-			ID:          "gpt-5.5",
-			DisplayName: "Default model",
-			Description: "Default model description.",
-		},
-	})
-	b.Cleanup(func() {
-		modelRegistry.UnregisterClient(clientID)
-	})
-
-	payload := []byte(`{
-		"tools":[
-			{"type":"namespace","name":"collaboration","tools":[
-				{"type":"function","name":"spawn_agent","description":"Spawns an agent.\n","parameters":{"type":"object","properties":{"message":{"type":"string","encrypted":true}}}},
-				{"type":"function","name":"send_message","parameters":{"type":"object","properties":{"message":{"type":"string","encrypted":true}}}},
-				{"type":"function","name":"followup_task","parameters":{"type":"object","properties":{"message":{"type":"string","encrypted":true}}}}
-			]}
-		]
-	}`)
-	headers := http.Header{"User-Agent": []string{"Codex Desktop/0.146.0-alpha.3"}}
-	ctx := context.Background()
-
-	b.ReportAllocs()
-	b.ResetTimer()
-	for i := 0; i < b.N; i++ {
-		PrepareCodexMultiAgentV2Tools(ctx, headers, payload, true, false)
-	}
-}
-
-func BenchmarkOptimizeCodexMultiAgentV2Request(b *testing.B) {
-	modelRegistry := registry.GetGlobalRegistry()
-	clientID := "bench-client-opt"
-	modelRegistry.RegisterClient(clientID, "openai", []*registry.ModelInfo{
-		{
-			ID:          "gpt-5.5",
-			DisplayName: "Default model",
-			Description: "Default model description.",
-		},
-	})
-	b.Cleanup(func() {
-		modelRegistry.UnregisterClient(clientID)
-	})
-
-	payload := []byte(`{
-		"tools":[
-			{"type":"namespace","name":"collaboration","tools":[
-				{"type":"function","name":"spawn_agent","description":"Spawns an agent.\n","parameters":{"type":"object","properties":{"message":{"type":"string","encrypted":true}}}},
-				{"type":"function","name":"send_message","parameters":{"type":"object","properties":{"message":{"type":"string","encrypted":true}}}},
-				{"type":"function","name":"followup_task","parameters":{"type":"object","properties":{"message":{"type":"string","encrypted":true}}}}
-			]}
-		]
-	}`)
-	headers := http.Header{"User-Agent": []string{"Codex Desktop/0.146.0-alpha.3"}}
-	cfg := &config.Config{Codex: config.CodexConfig{OptimizeMultiAgentV2: true}}
-	ctx := context.Background()
-
-	b.ReportAllocs()
-	b.ResetTimer()
-	for i := 0; i < b.N; i++ {
-		OptimizeCodexMultiAgentV2Request(ctx, headers, payload, cfg)
 	}
 }

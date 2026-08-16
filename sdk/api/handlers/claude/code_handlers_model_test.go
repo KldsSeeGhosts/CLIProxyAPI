@@ -81,6 +81,37 @@ func TestClaudeModelsResponseDisablesModelListCloaking(t *testing.T) {
 	t.Fatalf("uncloaked model %q not found in response", modelID)
 }
 
+func TestClaudeModelsResponseUsesConfiguredModelAllowlist(t *testing.T) {
+	const clientID = "claude-model-allowlist-test"
+	registryRef := registry.GetGlobalRegistry()
+	registryRef.RegisterClient(clientID, "claude", []*registry.ModelInfo{
+		{ID: "pi-scoped-model", Object: "model", OwnedBy: "test"},
+		{ID: "gateway-only-model", Object: "model", OwnedBy: "test"},
+	})
+	t.Cleanup(func() {
+		registryRef.UnregisterClient(clientID)
+	})
+
+	recorder := httptest.NewRecorder()
+	ctx, _ := gin.CreateTestContext(recorder)
+	baseHandler := &handlers.BaseAPIHandler{Cfg: &sdkconfig.SDKConfig{
+		ClaudeCode: sdkconfig.ClaudeCodeConfig{ModelAllowlist: []string{"pi-scoped-model"}},
+	}}
+	NewClaudeCodeAPIHandler(baseHandler).ClaudeModels(ctx)
+
+	var response struct {
+		Data []struct {
+			ID string `json:"id"`
+		} `json:"data"`
+	}
+	if errUnmarshal := json.Unmarshal(recorder.Body.Bytes(), &response); errUnmarshal != nil {
+		t.Fatalf("decode response: %v", errUnmarshal)
+	}
+	if len(response.Data) != 1 || response.Data[0].ID != "claude-fable-5-dd-ledom-depocs-ip" {
+		t.Fatalf("allowlisted model response = %v, want only cloaked pi-scoped model", response.Data)
+	}
+}
+
 func TestRewriteClaudeDDModelInBody(t *testing.T) {
 	tests := []struct {
 		name      string

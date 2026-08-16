@@ -24,6 +24,7 @@ func (e *AntigravityExecutor) ExecuteStream(ctx context.Context, auth *cliproxya
 	if opts.Alt == "responses/compact" {
 		return nil, statusErr{code: http.StatusNotImplemented, msg: "/responses/compact not supported"}
 	}
+	req.Model = resolveGemini37FlashDynamicModel(req.Model, req.Payload, opts.OriginalRequest)
 	baseModel := thinking.ParseSuffix(req.Model).ModelName
 
 	ctx = context.WithValue(ctx, "alt", "")
@@ -83,6 +84,7 @@ func (e *AntigravityExecutor) ExecuteStream(ctx context.Context, auth *cliproxya
 	httpClient = reporter.TrackHTTPClient(httpClient)
 
 	attempts := antigravityRetryAttempts(auth, e.cfg)
+	emptyRetries := 0
 
 attemptLoop:
 	for attempt := 0; attempt < attempts; attempt++ {
@@ -237,6 +239,49 @@ attemptLoop:
 			if useCredits {
 				clearAntigravityCreditsFailureState(auth)
 			}
+			// Peek at the upstream SSE stream before forwarding anything to the
+			// client: a stream that ends with no content payload is the transient
+			// empty-completion case and is retried without consuming the
+			// configured attempt budget.
+			bufferedStream, streamHasContent, errPeek := peekAntigravityStreamContent(ctx, httpResp.Body)
+			if errPeek != nil {
+				if errClose := httpResp.Body.Close(); errClose != nil {
+					log.Errorf("antigravity executor: close response body error: %v", errClose)
+				}
+				helps.RecordAPIResponseError(ctx, e.cfg, errPeek)
+				err = errPeek
+				return nil, err
+			}
+			if !streamHasContent {
+				if errClose := httpResp.Body.Close(); errClose != nil {
+					log.Errorf("antigravity executor: close response body error: %v", errClose)
+				}
+				if antigravityUsesSemanticContinuation(baseModel) {
+					// Do not replay Gemini 3.6's identical empty request. Emit a
+					// reasoning-only STOP that the Pi semantic recovery hook turns
+					// into a fresh, explicitly instructed continuation turn.
+					log.Warnf("antigravity executor: empty stream for model %s; emitting semantic continuation marker", baseModel)
+					bufferedStream = antigravitySemanticContinuationStream(baseModel)
+					httpResp.Body = io.NopCloser(bytes.NewReader(nil))
+				} else {
+					if emptyRetries < antigravityEmptyResponseMaxRetries {
+						emptyRetries++
+						delay := antigravityEmptyRetryDelay(emptyRetries)
+						log.Debugf("antigravity executor: empty stream for model %s, retrying in %s (empty retry %d/%d)", baseModel, delay, emptyRetries, antigravityEmptyResponseMaxRetries)
+						if errWait := antigravityWait(ctx, delay); errWait != nil {
+							return nil, errWait
+						}
+						attempt--
+						continue attemptLoop
+					}
+					err = statusErr{code: http.StatusBadGateway, msg: "antigravity executor: upstream returned an empty stream after retries"}
+					return nil, err
+				}
+			}
+			httpResp.Body = &antigravityPrependReadCloser{
+				reader: io.MultiReader(bytes.NewReader(bufferedStream), httpResp.Body),
+				closer: httpResp.Body,
+			}
 			replayAccumulator := newAntigravityReasoningReplayAccumulator(replayScope, requestPayload)
 			out := make(chan cliproxyexecutor.StreamChunk)
 			go func(resp *http.Response) {
@@ -271,7 +316,7 @@ attemptLoop:
 					}
 
 					payload = e.resolveWebSearchGroundingURLs(ctx, auth, from, originalPayload, translated, payload)
-					chunks := helps.TranslateStreamWithClaudeInputTokens(ctx, to, responseFormat, req.Model, opts.OriginalRequest, translated, bytes.Clone(payload), &param, claudeInputTokens)
+					chunks := helps.TranslateStreamWithClaudeInputTokens(ctx, to, responseFormat, req.Model, originalPayload, translated, bytes.Clone(payload), &param, claudeInputTokens)
 					for i := range chunks {
 						select {
 						case out <- cliproxyexecutor.StreamChunk{Payload: chunks[i]}:
@@ -280,7 +325,7 @@ attemptLoop:
 						}
 					}
 				}
-				tail := helps.TranslateStreamWithClaudeInputTokens(ctx, to, responseFormat, req.Model, opts.OriginalRequest, translated, []byte("[DONE]"), &param, claudeInputTokens)
+				tail := helps.TranslateStreamWithClaudeInputTokens(ctx, to, responseFormat, req.Model, originalPayload, translated, []byte("[DONE]"), &param, claudeInputTokens)
 				for i := range tail {
 					select {
 					case out <- cliproxyexecutor.StreamChunk{Payload: tail[i]}:
