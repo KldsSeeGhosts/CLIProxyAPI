@@ -125,8 +125,16 @@ func tryRefreshModels(ctx context.Context, label string) {
 		log.Infof("%s: clamped %d GPT-5.6 context_length field(s) to %d from %s", label, n, officialGpt56ContextWindow, url)
 	}
 
+	if n := migrateRetiredAntigravityModelIDs(parsed); n > 0 {
+		log.Warnf("%s: migrated %d retired Antigravity model ID(s) from %s", label, n, url)
+	}
+
 	if n := retainLastKnownGoodCodexCatalog(oldData, parsed); n > 0 {
 		log.Warnf("%s: retained %d Codex catalog section(s) that the remote snapshot omitted", label, n)
+	}
+
+	if n := retainOmittedVertexModels(oldData, parsed); n > 0 {
+		log.Warnf("%s: retained %d Vertex model(s) that the remote snapshot omitted", label, n)
 	}
 
 	// Detect changes before updating store.
@@ -148,6 +156,23 @@ func tryRefreshModels(ctx context.Context, label string) {
 
 // fetchModelsFromRemote tries all remote URLs and returns the parsed model catalog
 // along with the URL it was fetched from. Returns (nil, "") if all fetches fail.
+func migrateRetiredAntigravityModelIDs(models *staticModelsJSON) int {
+	if models == nil {
+		return 0
+	}
+	migrated := 0
+	for _, model := range models.Antigravity {
+		if model == nil || model.ID != "gemini-3.7-flash-high" {
+			continue
+		}
+		model.ID = "gemini-3.7-flash-tiered"
+		model.Name = "gemini-3.7-flash-tiered"
+		model.Description = "Gemini 3.7 Flash (Tiered)"
+		migrated++
+	}
+	return migrated
+}
+
 func fetchModelsFromRemote(ctx context.Context) (*staticModelsJSON, string) {
 	client := &http.Client{Timeout: modelsFetchTimeout}
 	for _, url := range modelsURLs {
@@ -218,6 +243,44 @@ func retainLastKnownGoodCodexCatalog(oldData, newData *staticModelsJSON) int {
 	retain(&newData.CodexPlus, oldData.CodexPlus, "codex-plus")
 	retain(&newData.CodexPro, oldData.CodexPro, "codex-pro")
 	return retained
+}
+
+// retainOmittedVertexModels keeps locally known Vertex models when a remote
+// refresh returns a non-empty Vertex section that simply has not listed them
+// yet. Vertex Gemini 3.7 Flash is the current case: the live alias
+// vertex/gemini-3.7-flash has nothing to fork from if the ID is dropped.
+func retainOmittedVertexModels(oldData, newData *staticModelsJSON) int {
+	if oldData == nil || newData == nil {
+		return 0
+	}
+	seen := make(map[string]struct{}, len(newData.Vertex))
+	for _, model := range newData.Vertex {
+		if model == nil {
+			continue
+		}
+		id := strings.ToLower(strings.TrimSpace(model.ID))
+		if id == "" {
+			continue
+		}
+		seen[id] = struct{}{}
+	}
+	added := 0
+	for _, model := range oldData.Vertex {
+		if model == nil {
+			continue
+		}
+		id := strings.ToLower(strings.TrimSpace(model.ID))
+		if id == "" {
+			continue
+		}
+		if _, exists := seen[id]; exists {
+			continue
+		}
+		newData.Vertex = append(newData.Vertex, cloneModelInfo(model))
+		seen[id] = struct{}{}
+		added++
+	}
+	return added
 }
 
 // detectChangedProviders compares two model catalogs and returns provider names

@@ -35,6 +35,52 @@ func TestGeminiVertexModelsUseFlashLiteReleaseID(t *testing.T) {
 	t.Fatalf("Vertex models do not contain %q", releaseID)
 }
 
+func TestGeminiVertexModelsInclude37Flash(t *testing.T) {
+	const wantID = "gemini-3.7-flash"
+	for _, model := range GetGeminiVertexModels() {
+		if model == nil {
+			continue
+		}
+		if model.ID != wantID {
+			continue
+		}
+		if model.Name != "models/"+wantID {
+			t.Fatalf("Vertex %s name = %q, want models/%s", wantID, model.Name, wantID)
+		}
+		return
+	}
+	t.Fatalf("Vertex models do not contain %q", wantID)
+}
+
+func TestRetainOmittedVertexModelsKeepsMissingRemoteIDs(t *testing.T) {
+	old := &staticModelsJSON{
+		Vertex: []*ModelInfo{
+			{ID: "gemini-3.6-flash", Name: "models/gemini-3.6-flash"},
+			{ID: "gemini-3.7-flash", Name: "models/gemini-3.7-flash"},
+		},
+	}
+	next := &staticModelsJSON{
+		Vertex: []*ModelInfo{
+			{ID: "gemini-3.6-flash", Name: "models/gemini-3.6-flash"},
+		},
+	}
+
+	got := retainOmittedVertexModels(old, next)
+	if got != 1 {
+		t.Fatalf("retained = %d, want 1", got)
+	}
+	found := false
+	for _, model := range next.Vertex {
+		if model != nil && model.ID == "gemini-3.7-flash" && model.Name == "models/gemini-3.7-flash" {
+			found = true
+			break
+		}
+	}
+	if !found {
+		t.Fatalf("Vertex = %#v, want retained gemini-3.7-flash", next.Vertex)
+	}
+}
+
 func TestWithXAIBuiltinsIncludesVideo15GAAndPreviewAlias(t *testing.T) {
 	models := WithXAIBuiltins(nil)
 	foundGA := false
