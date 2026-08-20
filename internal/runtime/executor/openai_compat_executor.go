@@ -106,6 +106,10 @@ func (e *OpenAICompatExecutor) Execute(ctx context.Context, auth *cliproxyauth.A
 	responseFormat := cliproxyexecutor.ResponseFormatOrSource(opts)
 	to := sdktranslator.FromString("openai")
 	endpoint := "/chat/completions"
+	if e.useResponsesUpstream(auth, baseModel) {
+		to = sdktranslator.FromString("openai-response")
+		endpoint = "/responses"
+	}
 	if opts.Alt == "responses/compact" {
 		to = sdktranslator.FromString("openai-response")
 		endpoint = "/responses/compact"
@@ -327,6 +331,11 @@ func (e *OpenAICompatExecutor) ExecuteStream(ctx context.Context, auth *cliproxy
 	from := opts.SourceFormat
 	responseFormat := cliproxyexecutor.ResponseFormatOrSource(opts)
 	to := sdktranslator.FromString("openai")
+	endpoint := "/chat/completions"
+	if e.useResponsesUpstream(auth, baseModel) {
+		to = sdktranslator.FromString("openai-response")
+		endpoint = "/responses"
+	}
 	originalPayloadSource := req.Payload
 	if len(opts.OriginalRequest) > 0 {
 		originalPayloadSource = opts.OriginalRequest
@@ -365,7 +374,7 @@ func (e *OpenAICompatExecutor) ExecuteStream(ctx context.Context, auth *cliproxy
 	}
 	reporter.SetTranslatedReasoningEffort(translated, to.String())
 
-	url := strings.TrimSuffix(baseURL, "/") + "/chat/completions"
+	url := strings.TrimSuffix(baseURL, "/") + endpoint
 	var attrs map[string]string
 	if auth != nil {
 		attrs = auth.Attributes
@@ -477,6 +486,7 @@ func (e *OpenAICompatExecutor) ExecuteStream(ctx context.Context, auth *cliproxy
 			upstreamDoneForwarded := false
 			aborted := false
 			failed := false
+			sawFinishReason := false
 			for scanner.Scan() {
 				line := scanner.Bytes()
 				helps.AppendAPIResponseChunk(ctx, e.cfg, line)
@@ -520,7 +530,33 @@ func (e *OpenAICompatExecutor) ExecuteStream(ctx context.Context, auth *cliproxy
 					break
 				}
 
+				if openAICompatStreamHasFinishReason(payload) {
+					sawFinishReason = true
+				}
+
 				upstreamDone := isCodexUpstreamDoneLine(trimmedLine)
+				if upstreamDone && openAICompatNeedsSyntheticStop(requestedModel, req.Model) && !sawFinishReason {
+					terminalLine := openAICompatSyntheticStopLineForPass(contOK, cont)
+					if contOK {
+						cont.observe(terminalLine)
+					}
+					chunks := helps.TranslateStreamWithClaudeInputTokens(ctx, to, responseFormat, req.Model, opts.OriginalRequest, currentBody, terminalLine, &param, claudeInputTokens)
+					for i := range chunks {
+						select {
+						case out <- cliproxyexecutor.StreamChunk{Payload: chunks[i]}:
+							if openAICompatResponsesTerminalChunk(chunks[i]) {
+								terminalResponsesEmitted = true
+							}
+						case <-ctx.Done():
+							aborted = true
+							break
+						}
+					}
+					if aborted {
+						break
+					}
+					sawFinishReason = true
+				}
 				if contOK {
 					cont.observe(trimmedLine)
 					if upstreamDone {
@@ -598,6 +634,24 @@ func (e *OpenAICompatExecutor) ExecuteStream(ctx context.Context, auth *cliproxy
 						}
 					}
 					return
+				}
+				if openAICompatNeedsSyntheticStop(requestedModel, req.Model) && !sawFinishReason {
+					terminalLine := openAICompatSyntheticStopLineForPass(contOK, cont)
+					if contOK {
+						cont.observe(terminalLine)
+					}
+					chunks := helps.TranslateStreamWithClaudeInputTokens(ctx, to, responseFormat, req.Model, opts.OriginalRequest, currentBody, terminalLine, &param, claudeInputTokens)
+					for i := range chunks {
+						select {
+						case out <- cliproxyexecutor.StreamChunk{Payload: chunks[i]}:
+							if openAICompatResponsesTerminalChunk(chunks[i]) {
+								terminalResponsesEmitted = true
+							}
+						case <-ctx.Done():
+							return
+						}
+					}
+					sawFinishReason = true
 				}
 				if terminalResponsesEmitted {
 					finishPass()
@@ -996,6 +1050,22 @@ func (e *OpenAICompatExecutor) resolveCredentials(auth *cliproxyauth.Auth) (base
 	return
 }
 
+func (e *OpenAICompatExecutor) useResponsesUpstream(auth *cliproxyauth.Auth, model string) bool {
+	compat := e.resolveCompatConfig(auth)
+	if compat == nil {
+		return false
+	}
+	model = strings.TrimSpace(model)
+	for i := range compat.Models {
+		candidate := &compat.Models[i]
+		if !strings.EqualFold(strings.TrimSpace(candidate.Name), model) && !strings.EqualFold(strings.TrimSpace(candidate.Alias), model) {
+			continue
+		}
+		return strings.EqualFold(strings.TrimSpace(candidate.UpstreamAPI), "responses")
+	}
+	return false
+}
+
 func (e *OpenAICompatExecutor) resolveCompatConfig(auth *cliproxyauth.Auth) *config.OpenAICompatibility {
 	if auth == nil || e.cfg == nil {
 		return nil
@@ -1042,6 +1112,54 @@ func (e *OpenAICompatExecutor) overrideModel(payload []byte, model string) []byt
 		return payload
 	}
 	return helps.SetStringIfDifferent(payload, "model", model)
+}
+
+func openAICompatSyntheticStopLineForPass(contOK bool, cont *codexContinuationController) []byte {
+	sawToolCall := contOK && cont != nil && cont.pass.sawToolCall
+	reason := "stop"
+	if sawToolCall {
+		reason = "tool_calls"
+	}
+	return openAICompatSyntheticStopLine(reason)
+}
+
+func openAICompatSyntheticStopLine(reason string) []byte {
+	if reason == "" {
+		reason = "stop"
+	}
+	return []byte(`data: {"choices":[{"index":0,"delta":{},"finish_reason":"` + reason + `"}]}`)
+}
+
+// openAICompatNeedsSyntheticStop reports whether an OpenCode Go Muse Spark
+// route should receive a synthetic Chat Completions finish_reason when the
+// upstream closes without one. Codex aliases may arrive as
+// opencode-go/muse-spark-1.2-contributor or the stripped upstream name.
+func openAICompatNeedsSyntheticStop(models ...string) bool {
+	for _, model := range models {
+		id := strings.ToLower(strings.TrimSpace(model))
+		if i := strings.LastIndex(id, "/"); i >= 0 {
+			id = id[i+1:]
+		}
+		switch id {
+		case "muse-spark-1.2-contributor", "muse-spark-1.2":
+			return true
+		}
+	}
+	return false
+}
+
+func openAICompatStreamHasFinishReason(body []byte) bool {
+	choices := gjson.GetBytes(body, "choices")
+	if !choices.IsArray() {
+		return false
+	}
+	for _, choice := range choices.Array() {
+		finishReason := choice.Get("finish_reason")
+		if finishReason.Type == gjson.String && finishReason.String() != "" {
+			return true
+		}
+	}
+	return false
 }
 
 // openAICompatStreamErrorPayload reports whether an SSE data payload is an

@@ -109,6 +109,179 @@ func TestOpenAICompatExecutorStreamIgnoresErrorNullAndKeepsDONE(t *testing.T) {
 	}
 }
 
+func TestOpenAICompatExecutorSynthesizesMuseSparkFinishReason(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "text/event-stream")
+		_, _ = w.Write([]byte(`data: {"id":"chatcmpl_1","object":"chat.completion.chunk","choices":[{"index":0,"delta":{"content":"OK"},"finish_reason":null}]}` + "\n"))
+		_, _ = w.Write([]byte(`data: [DONE]` + "\n"))
+	}))
+	defer server.Close()
+
+	executor := NewOpenAICompatExecutor("openai-compatibility", &config.Config{})
+	auth := &cliproxyauth.Auth{Attributes: map[string]string{
+		"base_url": server.URL + "/v1",
+		"api_key":  "test",
+	}}
+	result, err := executor.ExecuteStream(context.Background(), auth, cliproxyexecutor.Request{
+		Model:   "opencode-go/muse-spark-1.2-contributor",
+		Payload: []byte(`{"model":"opencode-go/muse-spark-1.2-contributor","messages":[{"role":"user","content":"hi"}],"stream":true}`),
+	}, cliproxyexecutor.Options{
+		SourceFormat: sdktranslator.FromString("openai"),
+		Stream:       true,
+	})
+	if err != nil {
+		t.Fatalf("ExecuteStream error: %v", err)
+	}
+
+	var joined string
+	for chunk := range result.Chunks {
+		if chunk.Err != nil {
+			t.Fatalf("unexpected stream error: %v", chunk.Err)
+		}
+		joined += string(chunk.Payload)
+	}
+	if !strings.Contains(joined, `"content":"OK"`) {
+		t.Fatalf("content chunk missing: %s", joined)
+	}
+	if !strings.Contains(joined, `"finish_reason":"stop"`) {
+		t.Fatalf("synthetic finish reason missing: %s", joined)
+	}
+}
+
+func TestOpenAICompatExecutorSynthesizesMuseSparkResponsesCompletion(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "text/event-stream")
+		_, _ = w.Write([]byte(`data: {"id":"chatcmpl_1","object":"chat.completion.chunk","choices":[{"index":0,"delta":{"content":"OK"},"finish_reason":null}]}` + "\n"))
+	}))
+	defer server.Close()
+
+	executor := NewOpenAICompatExecutor("openai-compatibility", &config.Config{})
+	auth := &cliproxyauth.Auth{Attributes: map[string]string{
+		"base_url": server.URL + "/v1",
+		"api_key":  "test",
+	}}
+	result, err := executor.ExecuteStream(context.Background(), auth, cliproxyexecutor.Request{
+		Model:   "opencode-go/muse-spark-1.2-contributor",
+		Payload: []byte(`{"model":"opencode-go/muse-spark-1.2-contributor","input":[{"role":"user","content":"hi"}],"stream":true}`),
+	}, cliproxyexecutor.Options{
+		SourceFormat: sdktranslator.FromString("openai-response"),
+		Stream:       true,
+	})
+	if err != nil {
+		t.Fatalf("ExecuteStream error: %v", err)
+	}
+
+	var joined string
+	for chunk := range result.Chunks {
+		if chunk.Err != nil {
+			t.Fatalf("unexpected stream error: %v", chunk.Err)
+		}
+		joined += string(chunk.Payload)
+	}
+	if !strings.Contains(joined, `"type":"response.completed"`) {
+		t.Fatalf("response.completed missing: %s", joined)
+	}
+}
+
+func TestOpenAICompatExecutorSynthesizesMuseSparkCodexEOFWithoutPrefix(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "text/event-stream")
+		_, _ = w.Write([]byte(`data: {"id":"chatcmpl_1","object":"chat.completion.chunk","choices":[{"index":0,"delta":{"content":"OK"},"finish_reason":null}]}` + "\n"))
+	}))
+	defer server.Close()
+
+	executor := NewOpenAICompatExecutor("openai-compatibility", &config.Config{
+		Codex: config.CodexConfig{
+			SemanticContinuation: config.CodexSemanticContinuationConfig{
+				Enabled:          true,
+				Models:           []string{"muse-spark-*", "opencode-go/*"},
+				MaxContinuations: 1,
+			},
+		},
+	})
+	auth := &cliproxyauth.Auth{Attributes: map[string]string{
+		"base_url": server.URL + "/v1",
+		"api_key":  "test",
+	}}
+	result, err := executor.ExecuteStream(context.Background(), auth, cliproxyexecutor.Request{
+		Model:   "muse-spark-1.2-contributor",
+		Payload: []byte(`{"model":"muse-spark-1.2-contributor","input":[{"role":"user","content":"hi"}],"tools":[{"type":"function","name":"exec_command","description":"run a command","parameters":{"type":"object","properties":{}}}],"stream":true}`),
+	}, cliproxyexecutor.Options{
+		Stream:         true,
+		SourceFormat:   sdktranslator.FormatOpenAIResponse,
+		ResponseFormat: sdktranslator.FormatOpenAIResponse,
+		Headers:        http.Header{"User-Agent": []string{"Codex Desktop/26.7"}},
+		Metadata: map[string]any{
+			cliproxyexecutor.RequestedModelMetadataKey: "muse-spark-1.2-contributor",
+		},
+	})
+	if err != nil {
+		t.Fatalf("ExecuteStream error: %v", err)
+	}
+
+	var joined string
+	for chunk := range result.Chunks {
+		if chunk.Err != nil {
+			t.Fatalf("unexpected stream error: %v", chunk.Err)
+		}
+		joined += string(chunk.Payload)
+	}
+	if !strings.Contains(joined, `"type":"response.completed"`) {
+		t.Fatalf("response.completed missing: %s", joined)
+	}
+}
+
+func TestOpenAICompatExecutorSynthesizesMuseSparkCodexToolCallEOF(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "text/event-stream")
+		_, _ = w.Write([]byte(`data: {"id":"chatcmpl_1","object":"chat.completion.chunk","choices":[{"index":0,"delta":{"tool_calls":[{"index":0,"id":"call_1","type":"function","function":{"name":"exec_command","arguments":"{}"}}]},"finish_reason":null}]}` + "\n"))
+	}))
+	defer server.Close()
+
+	executor := NewOpenAICompatExecutor("openai-compatibility", &config.Config{
+		Codex: config.CodexConfig{
+			SemanticContinuation: config.CodexSemanticContinuationConfig{
+				Enabled:          true,
+				Models:           []string{"muse-spark-*", "opencode-go/*"},
+				MaxContinuations: 1,
+			},
+		},
+	})
+	auth := &cliproxyauth.Auth{Attributes: map[string]string{
+		"base_url": server.URL + "/v1",
+		"api_key":  "test",
+	}}
+	result, err := executor.ExecuteStream(context.Background(), auth, cliproxyexecutor.Request{
+		Model:   "muse-spark-1.2-contributor",
+		Payload: []byte(`{"model":"muse-spark-1.2-contributor","input":[{"role":"user","content":"hi"}],"tools":[{"type":"function","name":"exec_command","description":"run a command","parameters":{"type":"object","properties":{}}}],"stream":true}`),
+	}, cliproxyexecutor.Options{
+		Stream:         true,
+		SourceFormat:   sdktranslator.FormatOpenAIResponse,
+		ResponseFormat: sdktranslator.FormatOpenAIResponse,
+		Headers:        http.Header{"User-Agent": []string{"Codex Desktop/26.7"}},
+		Metadata: map[string]any{
+			cliproxyexecutor.RequestedModelMetadataKey: "muse-spark-1.2-contributor",
+		},
+	})
+	if err != nil {
+		t.Fatalf("ExecuteStream error: %v", err)
+	}
+
+	var joined string
+	for chunk := range result.Chunks {
+		if chunk.Err != nil {
+			t.Fatalf("unexpected stream error: %v", chunk.Err)
+		}
+		joined += string(chunk.Payload)
+	}
+	if !strings.Contains(joined, `"type":"response.completed"`) {
+		t.Fatalf("response.completed missing: %s", joined)
+	}
+	if !strings.Contains(joined, `"name":"exec_command"`) {
+		t.Fatalf("tool call missing: %s", joined)
+	}
+}
+
 func TestOpenAICompatExecutorStreamSurfacesNumericCodeError(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "text/event-stream")

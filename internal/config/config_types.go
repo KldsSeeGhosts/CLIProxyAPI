@@ -682,6 +682,10 @@ type OpenAICompatibilityModel struct {
 	// OutputModalities declares supported output modalities when known (e.g. text, image).
 	OutputModalities []string `yaml:"output-modalities,omitempty" json:"output-modalities,omitempty"`
 
+	// UpstreamAPI selects the upstream OpenAI wire protocol. Empty uses chat completions;
+	// "responses" preserves Responses requests and sends them to /v1/responses.
+	UpstreamAPI string `yaml:"upstream-api,omitempty" json:"upstream-api,omitempty"`
+
 	// IsCompat preserves Claude thinking blocks for compatible upstreams.
 	// Default false keeps the normal signature validation behavior.
 	IsCompat bool `yaml:"is-compat,omitempty" json:"is-compat,omitempty"`
