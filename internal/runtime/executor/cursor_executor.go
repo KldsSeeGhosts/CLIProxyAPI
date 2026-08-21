@@ -347,7 +347,7 @@ func (e *CursorExecutor) Execute(ctx context.Context, auth *cliproxyauth.Auth, r
 	parsed := parseOpenAIRequest(payload)
 	ccSessId := cursorSessionID(ctx, req, opts)
 	conversationId := deriveConversationId(helps.APIKeyFromContext(ctx), ccSessId, parsed.SystemPrompt)
-	params := buildRunRequestParams(parsed, conversationId)
+	params := buildRunRequestParams(parsed, conversationId, req.Model)
 
 	requestBytes := cursorproto.EncodeRunRequest(params)
 	framedRequest := cursorproto.FrameConnectMessage(requestBytes, 0)
@@ -506,7 +506,7 @@ func (e *CursorExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.A
 	saved, hasCheckpoint := e.checkpoints[checkpointKey]
 	e.mu.Unlock()
 
-	params := buildRunRequestParams(parsed, conversationId)
+	params := buildRunRequestParams(parsed, conversationId, req.Model)
 
 	if hasCheckpoint && saved.data != nil && saved.authID == authID {
 		// Same auth — use checkpoint normally
@@ -530,7 +530,7 @@ func (e *CursorExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.A
 		e.mu.Unlock()
 		if len(parsed.ToolResults) > 0 || len(parsed.Turns) > 0 {
 			flattenConversationIntoUserText(parsed)
-			params = buildRunRequestParams(parsed, conversationId)
+			params = buildRunRequestParams(parsed, conversationId, req.Model)
 		}
 	} else if len(parsed.ToolResults) > 0 || len(parsed.Turns) > 0 {
 		// Fallback: no checkpoint available (cold resume / proxy restart).
@@ -538,7 +538,7 @@ func (e *CursorExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.A
 		// Cursor's turns encoding is not reliably read by the model, but userText always works.
 		log.Debugf("cursor: no checkpoint, flattening %d turns + %d tool results into userText", len(parsed.Turns), len(parsed.ToolResults))
 		flattenConversationIntoUserText(parsed)
-		params = buildRunRequestParams(parsed, conversationId)
+		params = buildRunRequestParams(parsed, conversationId, req.Model)
 	}
 	requestBytes := cursorproto.EncodeRunRequest(params)
 	framedRequest := cursorproto.FrameConnectMessage(requestBytes, 0)
@@ -1607,9 +1607,12 @@ func parseDataURL(url string) *cursorproto.ImageData {
 	}
 }
 
-func buildRunRequestParams(parsed *parsedOpenAIRequest, conversationId string) *cursorproto.RunRequestParams {
+func buildRunRequestParams(parsed *parsedOpenAIRequest, conversationId, modelID string) *cursorproto.RunRequestParams {
+	if modelID == "" {
+		modelID = parsed.Model
+	}
 	params := &cursorproto.RunRequestParams{
-		ModelId:        parsed.Model,
+		ModelId:        modelID,
 		SystemPrompt:   parsed.SystemPrompt,
 		UserText:       parsed.UserText,
 		MessageId:      uuid.New().String(),
@@ -2022,6 +2025,75 @@ func decodeMcpArgsToJSON(args map[string][]byte) string {
 }
 
 // --- Model Discovery ---
+
+// cursorGrok46ThinkingLevels are the discrete Cursor catalog SKUs for Grok 4.6.
+// Harnesses (Pi, Codex, Claude Code discovery) select one of these on the
+// virtual ID `cursor-grok-4.6`; the executor remaps to `cursor-grok-4.6-<level>`
+// (and optional `-fast`) before the Cursor Run RPC.
+var cursorGrok46ThinkingLevels = []string{"low", "medium", "high", "xhigh"}
+
+func isCursorGrok46TierID(id string) bool {
+	if !strings.HasPrefix(id, "cursor-grok-4.6-") {
+		return false
+	}
+	rest := strings.TrimSuffix(strings.TrimPrefix(id, "cursor-grok-4.6-"), "-fast")
+	switch rest {
+	case "low", "medium", "high", "xhigh":
+		return true
+	default:
+		return false
+	}
+}
+
+func applyCursorGrok46VirtualMetadata(info *registry.ModelInfo) {
+	if info == nil {
+		return
+	}
+	info.DisplayName = "Cursor Grok 4.6"
+	info.Thinking = &registry.ThinkingSupport{
+		Levels: append([]string(nil), cursorGrok46ThinkingLevels...),
+	}
+}
+
+// WithCursorGrok46VirtualModel adds the Pi/CPA virtual ID `cursor-grok-4.6` when
+// Cursor's catalog only published the tiered Grok 4.6 IDs, advertises the four
+// reasoning levels on that virtual ID, and hides the per-effort SKUs from
+// discovery. Auth selection keys off registered model IDs, so without the
+// virtual name the harness ID 503s even though the executor can remap
+// effort/fast after a Cursor auth is chosen. Direct requests to a hidden
+// SKU still route via GetProviderName fallback.
+func WithCursorGrok46VirtualModel(models []*registry.ModelInfo) []*registry.ModelInfo {
+	var template *registry.ModelInfo
+	var existing *registry.ModelInfo
+	advertised := make([]*registry.ModelInfo, 0, len(models)+1)
+	for _, model := range models {
+		if model == nil {
+			continue
+		}
+		switch {
+		case model.ID == "cursor-grok-4.6":
+			existing = model
+			advertised = append(advertised, model)
+		case isCursorGrok46TierID(model.ID):
+			if template == nil || model.ID == "cursor-grok-4.6-high" {
+				template = model
+			}
+		default:
+			advertised = append(advertised, model)
+		}
+	}
+	if existing != nil {
+		applyCursorGrok46VirtualMetadata(existing)
+		return advertised
+	}
+	if template == nil {
+		return advertised
+	}
+	virtual := *template
+	virtual.ID = "cursor-grok-4.6"
+	applyCursorGrok46VirtualMetadata(&virtual)
+	return append(advertised, &virtual)
+}
 
 // FetchCursorModels retrieves available models from Cursor's API.
 func FetchCursorModels(ctx context.Context, auth *cliproxyauth.Auth, cfg *config.Config) []*registry.ModelInfo {

@@ -158,6 +158,7 @@ func (s *Service) registerModelsForAuthWithCache(ctx context.Context, a *coreaut
 		if len(models) == 0 {
 			models = registry.GetCursorModels()
 		}
+		models = executor.WithCursorGrok46VirtualModel(models)
 		models = applyExcludedModels(models, excluded)
 	case "xai":
 		models = registry.GetXAIModels()
