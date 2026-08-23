@@ -72,6 +72,14 @@ func RewriteCodexMultiAgentV2Input(ctx context.Context, headers http.Header, pay
 	return rewriteCodexAgentMessageInput(payload)
 }
 
+// RewriteCodexAgentMessageInput converts Codex MultiAgentV2 agent_message items
+// into portable Responses message/user input. Third-party Responses endpoints
+// such as OpenCode Go reject native agent_message types, so this rewrite is
+// not gated on optimize-multi-agent-v2.
+func RewriteCodexAgentMessageInput(payload []byte) []byte {
+	return rewriteCodexAgentMessageInput(payload)
+}
+
 // TranslateRequestWithCodexMultiAgentV2 normalizes official Codex multi-agent
 // input before translating it to a non-Codex target protocol.
 func TranslateRequestWithCodexMultiAgentV2(ctx context.Context, headers http.Header, cfg *config.Config, from, to sdktranslator.Format, model string, payload []byte, stream bool) []byte {

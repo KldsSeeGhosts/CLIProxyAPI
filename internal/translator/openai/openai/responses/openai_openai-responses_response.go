@@ -312,7 +312,7 @@ func ConvertOpenAIChatCompletionsResponseToOpenAIResponses(ctx context.Context, 
 
 	root := gjson.ParseBytes(rawJSON)
 	obj := root.Get("object")
-	if obj.Exists() && obj.String() != "" && obj.String() != "chat.completion.chunk" {
+	if obj.Exists() && obj.String() != "" && obj.String() != "chat.completion.chunk" && obj.String() != "chat.completion" {
 		return [][]byte{}
 	}
 	if !root.Get("choices").Exists() || !root.Get("choices").IsArray() {
@@ -504,6 +504,9 @@ func ConvertOpenAIChatCompletionsResponseToOpenAIResponses(ctx context.Context, 
 		choices.ForEach(func(_, choice gjson.Result) bool {
 			idx := int(choice.Get("index").Int())
 			delta := choice.Get("delta")
+			if !delta.Exists() {
+				delta = choice.Get("message")
+			}
 			if delta.Exists() {
 				if c := delta.Get("content"); c.Exists() && c.String() != "" {
 					// Ensure the message item and its first content part are announced before any text deltas

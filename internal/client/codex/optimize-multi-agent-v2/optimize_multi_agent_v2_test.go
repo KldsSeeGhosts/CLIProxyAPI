@@ -685,6 +685,20 @@ func TestRewriteCodexMultiAgentV2InputConditions(t *testing.T) {
 	}
 }
 
+func TestRewriteCodexAgentMessageInputAlwaysFlattens(t *testing.T) {
+	payload := []byte(`{"input":[{"type":"agent_message","content":[{"type":"encrypted_content","encrypted_content":"task"}]}]}`)
+	got := RewriteCodexAgentMessageInput(payload)
+	if gjson.GetBytes(got, "input.0.type").String() != "message" {
+		t.Fatalf("type = %s, want message; payload=%s", gjson.GetBytes(got, "input.0.type").String(), got)
+	}
+	if gjson.GetBytes(got, "input.0.role").String() != "user" {
+		t.Fatalf("role = %s, want user; payload=%s", gjson.GetBytes(got, "input.0.role").String(), got)
+	}
+	if gjson.GetBytes(got, "input.0.content.0.type").String() != "input_text" || gjson.GetBytes(got, "input.0.content.0.text").String() != "task" {
+		t.Fatalf("encrypted_content was not flattened: %s", got)
+	}
+}
+
 func TestTranslateRequestWithCodexMultiAgentV2Conditions(t *testing.T) {
 	payload := []byte(`{"model":"test-model","input":[{"type":"agent_message","content":[{"type":"encrypted_content","encrypted_content":"task"}]}]}`)
 	enabledCfg := &config.Config{Codex: config.CodexConfig{OptimizeMultiAgentV2: true}}

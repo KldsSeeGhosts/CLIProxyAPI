@@ -194,6 +194,35 @@ func TestParseOpenAIStreamUsageResponsesFields(t *testing.T) {
 	}
 }
 
+func TestParseOpenAIStreamUsageNestedResponseUsage(t *testing.T) {
+	t.Parallel()
+	line := []byte(`data: {"type":"response.completed","response":{"usage":{"input_tokens":120,"output_tokens":30,"total_tokens":150,"input_tokens_details":{"cached_tokens":40}}}}`)
+	detail, ok := ParseOpenAIStreamUsage(line)
+	if !ok {
+		t.Fatal("ParseOpenAIStreamUsage() ok = false, want true")
+	}
+	if detail.InputTokens != 120 || detail.OutputTokens != 30 || detail.TotalTokens != 150 {
+		t.Fatalf("detail = %+v, want 120/30/150", detail)
+	}
+	if detail.CachedTokens != 40 {
+		t.Fatalf("cached tokens = %d, want 40", detail.CachedTokens)
+	}
+}
+
+func TestStreamUsageBufferObserveOpenAIStreamReadsNestedResponseUsage(t *testing.T) {
+	t.Parallel()
+	var buffer StreamUsageBuffer
+	buffer.ObserveOpenAIStream([]byte(`data: {"type":"response.output_text.delta","delta":"hi"}`))
+	buffer.ObserveOpenAIStream([]byte(`data: {"type":"response.completed","response":{"usage":{"input_tokens":120,"output_tokens":30,"total_tokens":150}}}`))
+	detail, ok := buffer.Detail()
+	if !ok {
+		t.Fatal("Detail() ok = false, want true")
+	}
+	if detail.InputTokens != 120 || detail.OutputTokens != 30 || detail.TotalTokens != 150 {
+		t.Fatalf("detail = %+v, want nested response.usage 120/30/150", detail)
+	}
+}
+
 func TestStreamUsageBufferKeepsLastUsage(t *testing.T) {
 	var buffer StreamUsageBuffer
 	buffer.Observe(usage.Detail{}, true)

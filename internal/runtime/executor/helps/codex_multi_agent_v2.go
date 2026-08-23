@@ -29,6 +29,12 @@ func RewriteCodexMultiAgentV2Input(ctx context.Context, headers http.Header, pay
 	return multiagentv2.RewriteCodexMultiAgentV2Input(ctx, headers, payload, cfg)
 }
 
+// RewriteCodexAgentMessageInput converts Codex agent_message items into portable
+// Responses message/user input for third-party Responses upstreams.
+func RewriteCodexAgentMessageInput(payload []byte) []byte {
+	return multiagentv2.RewriteCodexAgentMessageInput(payload)
+}
+
 // TranslateRequestWithCodexMultiAgentV2 normalizes official Codex multi-agent
 // input before translating it to a non-Codex target protocol.
 func TranslateRequestWithCodexMultiAgentV2(ctx context.Context, headers http.Header, cfg *config.Config, from, to sdktranslator.Format, model string, payload []byte, stream bool) []byte {
@@ -41,7 +47,7 @@ func TranslateRequestWithAPIKeyModelCompatibility(ctx context.Context, headers h
 	if !isCompat {
 		return TranslateRequestWithCodexMultiAgentV2(ctx, headers, cfg, from, to, model, payload, stream)
 	}
-	if from == sdktranslator.FormatOpenAIResponse && to != sdktranslator.FormatCodex && to != sdktranslator.FormatOpenAIResponse {
+	if from == sdktranslator.FormatOpenAIResponse && to != sdktranslator.FormatCodex {
 		payload = multiagentv2.RewriteCodexMultiAgentV2Input(ctx, headers, payload, cfg)
 	}
 

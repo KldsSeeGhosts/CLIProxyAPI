@@ -513,6 +513,26 @@ func TestConvertOpenAIChatCompletionsResponseToOpenAIResponses_FunctionCallDoneA
 	}
 }
 
+func TestConvertOpenAIChatCompletionsResponseToOpenAIResponses_ChatCompletionObjectIsTranslated(t *testing.T) {
+	request := []byte(`{"model":"muse-spark-1.2-contributor"}`)
+	var param any
+	var joined string
+	for _, line := range [][]byte{
+		[]byte(`data: {"id":"chatcmpl_full","object":"chat.completion","created":1787201300,"model":"muse-spark-1.2-contributor","choices":[{"index":0,"message":{"role":"assistant","content":"ready"},"finish_reason":"stop"}]}`),
+		[]byte(`data: [DONE]`),
+	} {
+		for _, chunk := range ConvertOpenAIChatCompletionsResponseToOpenAIResponses(context.Background(), "model", request, request, line, &param) {
+			joined += string(chunk)
+		}
+	}
+	if !strings.Contains(joined, `"ready"`) {
+		t.Fatalf("content missing: %s", joined)
+	}
+	if !strings.Contains(joined, `"type":"response.completed"`) {
+		t.Fatalf("response.completed missing: %s", joined)
+	}
+}
+
 func TestConvertOpenAIChatCompletionsResponseToOpenAIResponsesNonStream_OmitsTopLevelOutputText(t *testing.T) {
 	request := []byte(`{"model":"gpt-5.4"}`)
 	raw := []byte(`{"id":"chatcmpl_output_text","object":"chat.completion","created":1773896263,"model":"model","choices":[{"index":0,"message":{"role":"assistant","content":"ping"},"finish_reason":"stop"}],"usage":{"prompt_tokens":2,"completion_tokens":1,"total_tokens":3}}`)
