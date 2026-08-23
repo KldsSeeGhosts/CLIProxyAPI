@@ -508,7 +508,7 @@ func (b *StreamUsageBuffer) ObserveOpenAIStream(line []byte) {
 	detail := usage.Detail{}
 	usageOK := false
 	if hasUsageCandidate {
-		usageNode := gjson.GetBytes(payload, "usage")
+		usageNode := openAIStyleUsageNodeFromPayload(payload)
 		if hasOpenAIStyleUsageTokenFields(usageNode) {
 			detail = parseOpenAIStyleUsageNode(usageNode)
 			usageOK = true
@@ -677,7 +677,7 @@ func ParseOpenAIStreamUsage(line []byte) (usage.Detail, bool) {
 		return usage.Detail{}, false
 	}
 	responseServiceTier := extractResponseServiceTier(payload)
-	usageNode := gjson.GetBytes(payload, "usage")
+	usageNode := openAIStyleUsageNodeFromPayload(payload)
 	if !hasOpenAIStyleUsageTokenFields(usageNode) {
 		if responseServiceTier == "" {
 			return usage.Detail{}, false
@@ -687,6 +687,18 @@ func ParseOpenAIStreamUsage(line []byte) (usage.Detail, bool) {
 	detail := parseOpenAIStyleUsageNode(usageNode)
 	detail.ResponseServiceTier = responseServiceTier
 	return detail, true
+}
+
+// openAIStyleUsageNodeFromPayload reads Chat Completions `usage` first, then
+// Responses `response.usage`. OpenCode Go Muse Spark (and other Responses
+// upstreams) only emit the nested field, so a top-level lookup leaves CPA
+// Manager token telemetry at zero.
+func openAIStyleUsageNodeFromPayload(payload []byte) gjson.Result {
+	usageNode := gjson.GetBytes(payload, "usage")
+	if hasOpenAIStyleUsageTokenFields(usageNode) {
+		return usageNode
+	}
+	return gjson.GetBytes(payload, "response.usage")
 }
 
 func ParseClaudeUsage(data []byte) usage.Detail {

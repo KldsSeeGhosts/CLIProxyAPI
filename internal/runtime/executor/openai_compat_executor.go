@@ -30,11 +30,12 @@ import (
 )
 
 const (
-	openAICompatImageHandlerType            = "openai-image"
-	openAICompatImagesGenerationsPath       = "/images/generations"
-	openAICompatImagesEditsPath             = "/images/edits"
-	openAICompatDefaultImageEndpoint        = openAICompatImagesGenerationsPath
-	openAICompatMultipartMemory       int64 = 32 << 20
+	openAICompatImageHandlerType                = "openai-image"
+	openAICompatImagesGenerationsPath           = "/images/generations"
+	openAICompatImagesEditsPath                 = "/images/edits"
+	openAICompatDefaultImageEndpoint            = openAICompatImagesGenerationsPath
+	openAICompatMultipartMemory           int64 = 32 << 20
+	openAICompatEmptyCompletionMaxRetries       = 2
 )
 
 // OpenAICompatExecutor implements a stateless executor for OpenAI-compatible providers.
@@ -131,6 +132,7 @@ func (e *OpenAICompatExecutor) Execute(ctx context.Context, auth *cliproxyauth.A
 	requestedModel := helps.PayloadRequestedModel(opts, req.Model)
 	requestPath := helps.PayloadRequestPath(opts)
 	translated = helps.ApplyPayloadConfigWithRequest(e.cfg, baseModel, to.String(), from.String(), "", translated, originalTranslated, requestedModel, requestPath, opts.Headers)
+	translated = openAICompatRemoveMuseSparkOutputCap(translated, requestedModel, req.Model)
 	if helps.ShouldNormalizeOpenAIToolResultsForModel(e.resolveCompatConfig(auth), baseModel, requestedModel) {
 		translated = helps.NormalizeOpenAIToolResultsTextOnly(translated)
 	}
@@ -151,6 +153,9 @@ func (e *OpenAICompatExecutor) Execute(ctx context.Context, auth *cliproxyauth.A
 	// every Responses request (compact or ordinary) must be sanitized exactly once.
 	if sourceFormatEqual(from, sdktranslator.FormatOpenAIResponse) {
 		translated = sanitizeOpenAIResponsesReasoningEncryptedContent(ctx, "openai compat executor", translated)
+	}
+	if e.useResponsesUpstream(auth, baseModel) {
+		translated = openAICompatNormalizeResponsesUpstream(translated)
 	}
 	reporter.SetTranslatedReasoningEffort(translated, to.String())
 
@@ -213,6 +218,50 @@ func (e *OpenAICompatExecutor) Execute(ctx context.Context, auth *cliproxyauth.A
 		return resp, err
 	}
 	helps.AppendAPIResponseChunk(ctx, e.cfg, body)
+	for attempt := 0; openAICompatNeedsSyntheticStop(requestedModel, req.Model) && openAICompatAssistantOutputEmpty(body) && attempt < openAICompatEmptyCompletionMaxRetries; attempt++ {
+		delay := time.Duration(attempt+1) * 400 * time.Millisecond
+		log.Warnf("openai compat executor: empty completion for model %s; retrying in %s (empty retry %d/%d)", req.Model, delay, attempt+1, openAICompatEmptyCompletionMaxRetries)
+		select {
+		case <-ctx.Done():
+			err = ctx.Err()
+			return resp, err
+		case <-time.After(delay):
+		}
+		retryReq, errRetry := http.NewRequestWithContext(ctx, http.MethodPost, url, bytes.NewReader(translated))
+		if errRetry != nil {
+			err = errRetry
+			return resp, err
+		}
+		retryReq.Header = httpReq.Header.Clone()
+		retryResp, errRetry := httpClient.Do(retryReq)
+		if errRetry != nil {
+			helps.RecordAPIResponseError(ctx, e.cfg, errRetry)
+			err = errRetry
+			return resp, err
+		}
+		helps.RecordAPIResponseMetadata(ctx, e.cfg, retryResp.StatusCode, retryResp.Header.Clone())
+		b, errRead := io.ReadAll(retryResp.Body)
+		if errClose := retryResp.Body.Close(); errClose != nil {
+			log.Errorf("openai compat executor: close retry response body error: %v", errClose)
+		}
+		if errRead != nil {
+			helps.RecordAPIResponseError(ctx, e.cfg, errRead)
+			err = errRead
+			return resp, err
+		}
+		helps.AppendAPIResponseChunk(ctx, e.cfg, b)
+		if retryResp.StatusCode < 200 || retryResp.StatusCode >= 300 {
+			err = newOpenAICompatStatusErr(retryResp, b)
+			return resp, err
+		}
+		body = b
+		httpResp = retryResp
+	}
+	if openAICompatNeedsSyntheticStop(requestedModel, req.Model) && openAICompatAssistantOutputEmpty(body) {
+		err = statusErr{code: http.StatusBadGateway, msg: "openai compat executor: upstream returned an empty completion after retries"}
+		helps.RecordAPIResponseError(ctx, e.cfg, err)
+		return resp, err
+	}
 	reporter.Publish(ctx, helps.ParseOpenAIUsage(body))
 	// Ensure we at least record the request even if upstream doesn't return usage
 	reporter.EnsurePublished(ctx)
@@ -353,6 +402,7 @@ func (e *OpenAICompatExecutor) ExecuteStream(ctx context.Context, auth *cliproxy
 	requestedModel := helps.PayloadRequestedModel(opts, req.Model)
 	requestPath := helps.PayloadRequestPath(opts)
 	translated = helps.ApplyPayloadConfigWithRequest(e.cfg, baseModel, to.String(), from.String(), "", translated, originalTranslated, requestedModel, requestPath, opts.Headers)
+	translated = openAICompatRemoveMuseSparkOutputCap(translated, requestedModel, req.Model)
 	if helps.ShouldNormalizeOpenAIToolResultsForModel(e.resolveCompatConfig(auth), baseModel, requestedModel) {
 		translated = helps.NormalizeOpenAIToolResultsTextOnly(translated)
 	}
@@ -364,8 +414,13 @@ func (e *OpenAICompatExecutor) ExecuteStream(ctx context.Context, auth *cliproxy
 	}
 
 	// Request usage data in the final streaming chunk so that token statistics
-	// are captured even when the upstream is an OpenAI-compatible provider.
-	translated = helps.SetBoolIfDifferent(translated, "stream_options.include_usage", true)
+	// are captured even when the upstream is an OpenAI-compatible Chat Completions
+	// provider. Responses upstreams reject stream_options and Codex agent_message.
+	if e.useResponsesUpstream(auth, baseModel) {
+		translated = openAICompatNormalizeResponsesUpstream(translated)
+	} else {
+		translated = helps.SetBoolIfDifferent(translated, "stream_options.include_usage", true)
+	}
 	// Replayed reasoning items from a Responses client can carry an empty
 	// encrypted_content that is invalid for non-OpenAI providers; sanitize every
 	// Responses-source request once, exactly like the native codex executor.
@@ -479,8 +534,70 @@ func (e *OpenAICompatExecutor) ExecuteStream(ctx context.Context, auth *cliproxy
 			case <-ctx.Done():
 			}
 		}
+		emptyRetries := 0
 		for {
-			scanner := bufio.NewScanner(passResp.Body)
+			scanBody, rawJSON, errPrep := openAICompatPrepareStreamScan(passResp)
+			if errPrep != nil {
+				helps.RecordAPIResponseError(ctx, e.cfg, errPrep)
+				reporter.PublishFailure(ctx, errPrep)
+				select {
+				case out <- cliproxyexecutor.StreamChunk{Err: errPrep}:
+				case <-ctx.Done():
+				}
+				return
+			}
+			if openAICompatNeedsSyntheticStop(requestedModel, req.Model) && openAICompatAssistantOutputEmpty(rawJSON) {
+				if errClose := passResp.Body.Close(); errClose != nil {
+					log.Errorf("openai compat executor: close response body error: %v", errClose)
+				}
+				if emptyRetries < openAICompatEmptyCompletionMaxRetries {
+					emptyRetries++
+					delay := time.Duration(emptyRetries) * 400 * time.Millisecond
+					log.Warnf("openai compat executor: empty completion for model %s; retrying in %s (empty retry %d/%d)", req.Model, delay, emptyRetries, openAICompatEmptyCompletionMaxRetries)
+					select {
+					case <-ctx.Done():
+						return
+					case <-time.After(delay):
+					}
+					nextResp, errNext := startStream(currentBody)
+					if errNext != nil {
+						helps.RecordAPIResponseError(ctx, e.cfg, errNext)
+						reporter.PublishFailure(ctx, errNext)
+						select {
+						case out <- cliproxyexecutor.StreamChunk{Err: errNext}:
+						case <-ctx.Done():
+						}
+						return
+					}
+					helps.RecordAPIResponseMetadata(ctx, e.cfg, nextResp.StatusCode, nextResp.Header.Clone())
+					if nextResp.StatusCode < 200 || nextResp.StatusCode >= 300 {
+						b, _ := io.ReadAll(nextResp.Body)
+						helps.AppendAPIResponseChunk(ctx, e.cfg, b)
+						if errClose := nextResp.Body.Close(); errClose != nil {
+							log.Errorf("openai compat executor: close continuation response body error: %v", errClose)
+						}
+						streamErr := newOpenAICompatStatusErr(nextResp, b)
+						helps.RecordAPIResponseError(ctx, e.cfg, streamErr)
+						reporter.PublishFailure(ctx, streamErr)
+						select {
+						case out <- cliproxyexecutor.StreamChunk{Err: streamErr}:
+						case <-ctx.Done():
+						}
+						return
+					}
+					passResp = nextResp
+					continue
+				}
+				streamErr := statusErr{code: http.StatusBadGateway, msg: "openai compat executor: upstream returned an empty completion after retries"}
+				helps.RecordAPIResponseError(ctx, e.cfg, streamErr)
+				reporter.PublishFailure(ctx, streamErr)
+				select {
+				case out <- cliproxyexecutor.StreamChunk{Err: streamErr}:
+				case <-ctx.Done():
+				}
+				return
+			}
+			scanner := bufio.NewScanner(scanBody)
 			scanner.Buffer(nil, 52_428_800) // 50MB
 			continueUpstream := false
 			upstreamDoneForwarded := false
@@ -491,7 +608,7 @@ func (e *OpenAICompatExecutor) ExecuteStream(ctx context.Context, auth *cliproxy
 				line := scanner.Bytes()
 				helps.AppendAPIResponseChunk(ctx, e.cfg, line)
 				streamUsage.ObserveOpenAIStream(line)
-				trimmedLine := bytes.TrimSpace(line)
+				trimmedLine := openAICompatNormalizeStreamLine(bytes.TrimSpace(line))
 				if len(trimmedLine) == 0 {
 					continue
 				}
@@ -1050,6 +1167,14 @@ func (e *OpenAICompatExecutor) resolveCredentials(auth *cliproxyauth.Auth) (base
 	return
 }
 
+func openAICompatNormalizeResponsesUpstream(payload []byte) []byte {
+	updated := helps.RewriteCodexAgentMessageInput(payload)
+	if next, err := sjson.DeleteBytes(updated, "stream_options"); err == nil {
+		updated = next
+	}
+	return updated
+}
+
 func (e *OpenAICompatExecutor) useResponsesUpstream(auth *cliproxyauth.Auth, model string) bool {
 	compat := e.resolveCompatConfig(auth)
 	if compat == nil {
@@ -1114,6 +1239,161 @@ func (e *OpenAICompatExecutor) overrideModel(payload []byte, model string) []byt
 	return helps.SetStringIfDifferent(payload, "model", model)
 }
 
+// openAICompatNormalizeStreamLine rewrites a non-SSE OpenAI Chat Completions
+// JSON body (or a data: line whose object is chat.completion) into a
+// chat.completion.chunk SSE line. OpenCode Go Muse Spark sometimes answers a
+// streamed request with a single application/json completion; treating that as
+// a 502 made Codex surface the raw body.
+func openAICompatNormalizeStreamLine(line []byte) []byte {
+	trimmed := bytes.TrimSpace(line)
+	if len(trimmed) == 0 {
+		return line
+	}
+	payload := trimmed
+	if bytes.HasPrefix(trimmed, []byte("data:")) {
+		payload = bytes.TrimSpace(trimmed[5:])
+	}
+	if len(payload) == 0 || payload[0] != '{' || !gjson.ValidBytes(payload) {
+		return line
+	}
+	normalized, ok := openAICompatNormalizeChatCompletionPayload(payload)
+	if !ok {
+		return line
+	}
+	return append([]byte("data: "), normalized...)
+}
+
+func openAICompatPrepareStreamScan(resp *http.Response) (scan io.Reader, raw []byte, err error) {
+	if resp == nil || resp.Body == nil {
+		return bytes.NewReader(nil), nil, nil
+	}
+	br := bufio.NewReaderSize(resp.Body, 64*1024)
+	preview, peekErr := br.Peek(64)
+	if peekErr != nil && peekErr != io.EOF {
+		return br, nil, nil
+	}
+	ct, _, _ := mime.ParseMediaType(resp.Header.Get("Content-Type"))
+	jsonCT := false
+	switch strings.ToLower(ct) {
+	case "application/json", "text/json":
+		jsonCT = true
+	}
+	trimmedPreview := bytes.TrimLeft(preview, " \t\r\n")
+	looksJSON := len(trimmedPreview) > 0 && trimmedPreview[0] == '{' && !bytes.Contains(preview, []byte("data:"))
+	if !jsonCT && !looksJSON {
+		return br, nil, nil
+	}
+	raw, err = io.ReadAll(br)
+	if err != nil {
+		return nil, nil, err
+	}
+	raw = bytes.TrimSpace(raw)
+	if compact := openAICompatCompactJSON(raw); compact != nil {
+		raw = compact
+	}
+	line := openAICompatNormalizeStreamLine(raw)
+	if !bytes.HasPrefix(bytes.TrimSpace(line), []byte("data:")) && gjson.GetBytes(raw, "choices").IsArray() {
+		line = append([]byte("data: "), raw...)
+	}
+	buf := make([]byte, 0, len(line)+1)
+	buf = append(buf, line...)
+	buf = append(buf, '\n')
+	return bytes.NewReader(buf), raw, nil
+}
+
+func openAICompatCompactJSON(raw []byte) []byte {
+	if len(raw) == 0 || !gjson.ValidBytes(raw) {
+		return nil
+	}
+	var compact bytes.Buffer
+	if err := json.Compact(&compact, raw); err != nil {
+		return nil
+	}
+	return compact.Bytes()
+}
+
+func openAICompatAssistantOutputEmpty(raw []byte) bool {
+	if len(bytes.TrimSpace(raw)) == 0 {
+		return false
+	}
+	root := gjson.ParseBytes(raw)
+	obj := root.Get("object").String()
+	switch obj {
+	case "", "chat.completion", "chat.completion.chunk":
+	default:
+		return false
+	}
+	choices := root.Get("choices")
+	if !choices.IsArray() {
+		return false
+	}
+	if len(choices.Array()) == 0 {
+		return true
+	}
+	for _, choice := range choices.Array() {
+		msg := choice.Get("message")
+		if !msg.Exists() {
+			msg = choice.Get("delta")
+		}
+		if content := msg.Get("content"); content.Type == gjson.String && content.String() != "" {
+			return false
+		}
+		if rc := msg.Get("reasoning_content"); rc.Type == gjson.String && rc.String() != "" {
+			return false
+		}
+		if tcs := msg.Get("tool_calls"); tcs.IsArray() && len(tcs.Array()) > 0 {
+			return false
+		}
+		if fc := msg.Get("function_call"); fc.Exists() && fc.Type == gjson.JSON {
+			return false
+		}
+	}
+	return true
+}
+
+func openAICompatNormalizeChatCompletionPayload(payload []byte) ([]byte, bool) {
+	root := gjson.ParseBytes(payload)
+	choices := root.Get("choices")
+	if !choices.IsArray() {
+		return nil, false
+	}
+	obj := root.Get("object").String()
+	hasMessage := choices.Get("0.message").Exists()
+	hasDelta := choices.Get("0.delta").Exists()
+	isFullCompletion := obj == "chat.completion" || (obj != "chat.completion.chunk" && hasMessage && !hasDelta)
+	if !isFullCompletion {
+		if obj == "chat.completion.chunk" || obj == "" || hasDelta || hasMessage {
+			return payload, true
+		}
+		return nil, false
+	}
+	out := payload
+	out, _ = sjson.SetBytes(out, "object", "chat.completion.chunk")
+	for i, choice := range choices.Array() {
+		prefix := fmt.Sprintf("choices.%d", i)
+		if msg := choice.Get("message"); msg.Exists() && msg.IsObject() && !choice.Get("delta").Exists() {
+			out, _ = sjson.SetRawBytes(out, prefix+".delta", []byte(msg.Raw))
+			out, _ = sjson.DeleteBytes(out, prefix+".message")
+		}
+		fr := choice.Get("finish_reason")
+		if fr.Exists() && fr.Type == gjson.String && fr.String() != "" {
+			continue
+		}
+		delta := gjson.GetBytes(out, prefix+".delta")
+		if openAICompatAssistantOutputEmpty(out) {
+			continue
+		}
+		reason := "stop"
+		if tcs := delta.Get("tool_calls"); tcs.IsArray() && len(tcs.Array()) > 0 {
+			reason = "tool_calls"
+		} else if fc := delta.Get("function_call"); fc.Exists() && fc.Type == gjson.JSON {
+			reason = "function_call"
+		}
+		out, _ = sjson.SetBytes(out, prefix+".finish_reason", reason)
+	}
+	return out, true
+}
+
 func openAICompatSyntheticStopLineForPass(contOK bool, cont *codexContinuationController) []byte {
 	sawToolCall := contOK && cont != nil && cont.pass.sawToolCall
 	reason := "stop"
@@ -1128,6 +1408,22 @@ func openAICompatSyntheticStopLine(reason string) []byte {
 		reason = "stop"
 	}
 	return []byte(`data: {"choices":[{"index":0,"delta":{},"finish_reason":"` + reason + `"}]}`)
+}
+
+// OpenCode Go currently returns empty Muse Spark completions whenever a Chat
+// Completions output-token cap is present. Remove only those unsupported caps
+// for the affected models and leave the rest of the client request unchanged.
+func openAICompatRemoveMuseSparkOutputCap(payload []byte, models ...string) []byte {
+	if !openAICompatNeedsSyntheticStop(models...) {
+		return payload
+	}
+	updated := payload
+	for _, path := range []string{"max_tokens", "max_completion_tokens", "max_output_tokens"} {
+		if next, err := sjson.DeleteBytes(updated, path); err == nil {
+			updated = next
+		}
+	}
+	return updated
 }
 
 // openAICompatNeedsSyntheticStop reports whether an OpenCode Go Muse Spark
