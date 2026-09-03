@@ -68,6 +68,34 @@ func TestRegisterModelsForAuth_UsesPreMergedExcludedModelsAttribute(t *testing.T
 	}
 }
 
+func TestRegisterModelsForAuth_ZAIRegistersCodingPlanModels(t *testing.T) {
+	service := &Service{cfg: &config.Config{}}
+	auth := &coreauth.Auth{
+		ID:       "auth-zai",
+		Provider: "zai",
+		Status:   coreauth.StatusActive,
+	}
+
+	modelRegistry := internalregistry.GetGlobalRegistry()
+	modelRegistry.UnregisterClient(auth.ID)
+	t.Cleanup(func() { modelRegistry.UnregisterClient(auth.ID) })
+
+	service.registerModelsForAuth(context.Background(), auth)
+
+	models := modelRegistry.GetModelsForClient(auth.ID)
+	seen := make(map[string]bool, len(models))
+	for _, model := range models {
+		if model != nil {
+			seen[strings.TrimSpace(model.ID)] = true
+		}
+	}
+	for _, modelID := range []string{"glm-5.3", "glm-5.3-flash"} {
+		if !seen[modelID] {
+			t.Fatalf("expected %s to be registered for zai auth", modelID)
+		}
+	}
+}
+
 func TestRegisterModelsForAuth_OpenAICompatibilityImageModelType(t *testing.T) {
 	service := &Service{
 		cfg: &config.Config{

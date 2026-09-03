@@ -984,6 +984,9 @@ func (h *Handler) requestZAIToken(c *gin.Context, provider string) {
 			Storage:  tokenStorage,
 			Metadata: metadata,
 		}
+		if errGuard := guardOAuthSessionPendingForSave(state, "zai"); errGuard != nil {
+			return
+		}
 		savedPath, errSave := h.saveTokenRecord(ctx, record)
 		if errSave != nil {
 			log.Errorf("Failed to save authentication tokens: %v", errSave)

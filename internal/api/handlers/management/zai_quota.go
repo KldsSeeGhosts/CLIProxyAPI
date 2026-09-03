@@ -29,6 +29,8 @@ type zaiQuotaWindow struct {
 	Remaining *int64 `json:"remaining,omitempty"`
 	// ResetAtMs is the epoch-millisecond time the window rolls over.
 	ResetAtMs *int64 `json:"reset_at_ms,omitempty"`
+	// PeriodHours is the nominal window size used by quota timelines.
+	PeriodHours *float64 `json:"period_hours,omitempty"`
 }
 
 // zaiQuotaAccount is the quota snapshot for one stored zai/bigmodel credential.
@@ -43,9 +45,27 @@ type zaiQuotaAccount struct {
 	Raw      map[string]any   `json:"raw,omitempty"`
 }
 
-// zaiUnitWindowMinutes maps the upstream duration unit codes to minutes, mirroring
-// the official client: 1=day, 3=hour, 5=minute, 6=week.
-var zaiUnitWindowMinutes = map[int64]int64{1: 1440, 3: 60, 5: 1, 6: 10080}
+// zaiWindowMinutes converts the duration codes used by the monitor API to a
+// nominal number of minutes. Z.ai has emitted both 1 and 4 for day windows.
+// Month windows use 30 days only for timeline sizing; their reset timestamp
+// remains authoritative.
+func zaiWindowMinutes(unit, number int64) int64 {
+	if number <= 0 {
+		return 0
+	}
+	switch unit {
+	case 1, 4:
+		return number * 24 * 60
+	case 3:
+		return number * 60
+	case 5:
+		return number * 30 * 24 * 60
+	case 6:
+		return number * 7 * 24 * 60
+	default:
+		return 0
+	}
+}
 
 // zaiQuotaHost returns the monitor API host for a stored credential's provider.
 func zaiQuotaHost(provider string) string {
@@ -69,12 +89,12 @@ func zaiWindowLabel(kind string, unit, number, windowMinutes int64) string {
 		return "5-hour"
 	case unit == 6:
 		return fmt.Sprintf("%d week%s", number, plural(number))
-	case unit == 1:
+	case unit == 1 || unit == 4:
 		return fmt.Sprintf("%d day%s", number, plural(number))
 	case unit == 3:
 		return fmt.Sprintf("%d hour%s", number, plural(number))
-	case unit == 5 && number == 1:
-		return "monthly"
+	case unit == 5:
+		return fmt.Sprintf("%d month%s", number, plural(number))
 	default:
 		return fmt.Sprintf("%d min", windowMinutes)
 	}
@@ -98,8 +118,7 @@ func fetchZAIQuota(ctx context.Context, host, apiKey string) (map[string]any, er
 	req.Header.Set("authorization", "Bearer "+apiKey)
 	req.Header.Set("accept", "application/json")
 
-	client := &http.Client{Timeout: 15 * time.Second}
-	resp, err := client.Do(req)
+	resp, err := http.DefaultClient.Do(req)
 	if err != nil {
 		return nil, fmt.Errorf("request failed: %w", err)
 	}
@@ -142,24 +161,22 @@ func normalizeZAIQuota(payload map[string]any) (plan string, windows []zaiQuotaW
 		}
 		unit := zaiJSONInt(limit["unit"])
 		number := zaiJSONInt(limit["number"])
-		multiplier, ok := zaiUnitWindowMinutes[unit]
-		windowMinutes := int64(0)
-		if ok && number > 0 {
-			windowMinutes = number * multiplier
-		}
+		windowMinutes := zaiWindowMinutes(unit, number)
 		percentage := int(zaiJSONInt(limit["percentage"]))
-		if usage := zaiJSONInt(limit["usage"]); usage > 0 {
-			used := usage - zaiJSONInt(limit["remaining"])
-			if current := zaiJSONInt(limit["currentValue"]); current > 0 && current > used {
-				used = current
+		if _, hasPercentage := limit["percentage"]; !hasPercentage {
+			if usage := zaiJSONInt(limit["usage"]); usage > 0 {
+				used := usage - zaiJSONInt(limit["remaining"])
+				if current := zaiJSONInt(limit["currentValue"]); current > 0 && current > used {
+					used = current
+				}
+				if used < 0 {
+					used = 0
+				}
+				if used > usage {
+					used = usage
+				}
+				percentage = int(used * 100 / usage)
 			}
-			if used < 0 {
-				used = 0
-			}
-			if used > usage {
-				used = usage
-			}
-			percentage = int(used * 100 / usage)
 		}
 		if percentage < 0 {
 			percentage = 0
@@ -179,7 +196,14 @@ func normalizeZAIQuota(payload map[string]any) (plan string, windows []zaiQuotaW
 			window.Remaining = &remaining
 		}
 		if reset := zaiJSONInt(limit["nextResetTime"]); reset > 0 {
+			if reset < 1_000_000_000_000 {
+				reset *= 1000
+			}
 			window.ResetAtMs = &reset
+		}
+		if windowMinutes > 0 {
+			periodHours := float64(windowMinutes) / 60
+			window.PeriodHours = &periodHours
 		}
 		windows = append(windows, window)
 	}
