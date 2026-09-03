@@ -1,6 +1,11 @@
 package config
 
-import "testing"
+import (
+	"encoding/json"
+	"testing"
+
+	"gopkg.in/yaml.v3"
+)
 
 func TestSanitizeOAuthModelAlias_PreservesOptionalFields(t *testing.T) {
 	cfg := &Config{
@@ -52,5 +57,50 @@ func TestSanitizeOAuthModelAlias_AllowsMultipleAliasesForSameName(t *testing.T) 
 		if aliases[i].Name != exp.Name || aliases[i].Alias != exp.Alias || aliases[i].Fork != exp.Fork {
 			t.Fatalf("expected alias %d to be name=%q alias=%q fork=%v, got name=%q alias=%q fork=%v", i, exp.Name, exp.Alias, exp.Fork, aliases[i].Name, aliases[i].Alias, aliases[i].Fork)
 		}
+	}
+}
+
+func TestOAuthModelAliasMaxContextLengthConfigDecoding(t *testing.T) {
+	const want = 1048576
+	const yamlConfig = `oauth-model-alias:
+  codex:
+    - name: gpt-upstream
+      alias: gpt-visible
+      max-context-length: 1048576
+`
+	const jsonConfig = `{"oauth-model-alias":{"codex":[{"name":"gpt-upstream","alias":"gpt-visible","max-context-length":1048576}]}}`
+
+	for _, testCase := range []struct {
+		name   string
+		decode func(*Config) error
+	}{
+		{
+			name: "YAML",
+			decode: func(cfg *Config) error {
+				return yaml.Unmarshal([]byte(yamlConfig), cfg)
+			},
+		},
+		{
+			name: "JSON",
+			decode: func(cfg *Config) error {
+				return json.Unmarshal([]byte(jsonConfig), cfg)
+			},
+		},
+	} {
+		t.Run(testCase.name, func(t *testing.T) {
+			var cfg Config
+			if errDecode := testCase.decode(&cfg); errDecode != nil {
+				t.Fatalf("decode config: %v", errDecode)
+			}
+			cfg.SanitizeOAuthModelAlias()
+
+			aliases := cfg.OAuthModelAlias["codex"]
+			if len(aliases) != 1 {
+				t.Fatalf("expected 1 alias, got %d", len(aliases))
+			}
+			if aliases[0].MaxContextLength != want {
+				t.Errorf("max-context-length = %d, want %d", aliases[0].MaxContextLength, want)
+			}
+		})
 	}
 }

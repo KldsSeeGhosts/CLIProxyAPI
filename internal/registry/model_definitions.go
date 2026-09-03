@@ -79,7 +79,7 @@ func GetKimiModels() []*ModelInfo {
 
 // GetAntigravityModels returns the standard Antigravity model definitions.
 func GetAntigravityModels() []*ModelInfo {
-	return cloneModelInfos(getModels().Antigravity)
+	return withAntigravityBuiltins(cloneModelInfos(getModels().Antigravity))
 }
 
 // AntigravityWebSearchModelFor returns the Antigravity model that should run a
@@ -123,6 +123,39 @@ func WithCodexBuiltins(models []*ModelInfo) []*ModelInfo {
 // not depend on remote models.json updates.
 func WithXAIBuiltins(models []*ModelInfo) []*ModelInfo {
 	return upsertModelInfos(models, xaiBuiltinImageModelInfo(), xaiBuiltinImageQualityModelInfo(), xaiBuiltinImage20ModelInfo(), xaiBuiltinVideoModelInfo(), xaiBuiltinVideo15ModelInfo(), xaiBuiltinVideo15PreviewModelInfo())
+}
+
+// withAntigravityBuiltins keeps newly released models routable when the remote
+// catalog refresh lags behind the authenticated Antigravity model catalog.
+func withAntigravityBuiltins(models []*ModelInfo) []*ModelInfo {
+	return upsertModelInfos(models,
+		antigravityGemini38FlashModelInfo("low"),
+		antigravityGemini38FlashModelInfo("medium"),
+		antigravityGemini38FlashModelInfo("high"),
+	)
+}
+
+func antigravityGemini38FlashModelInfo(tier string) *ModelInfo {
+	id := "gemini-3.8-flash-" + tier
+	return &ModelInfo{
+		ID:                  id,
+		Object:              "model",
+		OwnedBy:             "antigravity",
+		Type:                "antigravity",
+		DisplayName:         "Gemini 3.8 Flash",
+		Name:                id,
+		Description:         "Gemini 3.8 Flash (" + strings.ToUpper(tier[:1]) + tier[1:] + ")",
+		ContextLength:       1048576,
+		MaxCompletionTokens: 65536,
+		Thinking: &ThinkingSupport{
+			Min:            1,
+			Max:            65535,
+			DynamicAllowed: true,
+			Levels:         []string{"low", "medium", "high"},
+		},
+		SupportedInputModalities:  []string{"text", "image", "audio", "video"},
+		SupportedOutputModalities: []string{"text"},
+	}
 }
 
 func normalizeAntigravityCapabilityModelID(modelID string) string {

@@ -940,12 +940,15 @@ func oauthModelAliasesForAuth(cfg *config.Config, channel string, attributes map
 
 func applyOAuthModelAliasEntries(aliases []config.OAuthModelAlias, models []*ModelInfo) []*ModelInfo {
 	type aliasEntry struct {
-		alias       string
-		displayName string
-		fork        bool
+		alias            string
+		displayName      string
+		maxContextLength int
+		fork             bool
+		forceMapping     bool
 	}
 
 	forward := make(map[string][]aliasEntry, len(aliases))
+	forceMappedByAlias := make(map[string]aliasEntry, len(aliases))
 	for i := range aliases {
 		name := strings.TrimSpace(aliases[i].Name)
 		alias := strings.TrimSpace(aliases[i].Alias)
@@ -955,12 +958,18 @@ func applyOAuthModelAliasEntries(aliases []config.OAuthModelAlias, models []*Mod
 		if strings.EqualFold(name, alias) {
 			continue
 		}
+		entry := aliasEntry{
+			alias:            alias,
+			displayName:      strings.TrimSpace(aliases[i].DisplayName),
+			maxContextLength: aliases[i].MaxContextLength,
+			fork:             aliases[i].Fork,
+			forceMapping:     aliases[i].ForceMapping,
+		}
 		key := strings.ToLower(name)
-		forward[key] = append(forward[key], aliasEntry{
-			alias:       alias,
-			displayName: strings.TrimSpace(aliases[i].DisplayName),
-			fork:        aliases[i].Fork,
-		})
+		forward[key] = append(forward[key], entry)
+		if entry.forceMapping && entry.maxContextLength > 0 {
+			forceMappedByAlias[strings.ToLower(alias)] = entry
+		}
 	}
 	if len(forward) == 0 {
 		return models
@@ -975,6 +984,13 @@ func applyOAuthModelAliasEntries(aliases []config.OAuthModelAlias, models []*Mod
 		id := strings.TrimSpace(model.ID)
 		if id == "" {
 			continue
+		}
+		// A force-mapped alias reroutes every request for its alias ID to the
+		// source model, so a registered model sharing the alias ID advertises
+		// the source model's configured context capacity.
+		if entry, ok := forceMappedByAlias[strings.ToLower(id)]; ok {
+			model.ContextLength = entry.maxContextLength
+			model.MaxContextLength = entry.maxContextLength
 		}
 		key := strings.ToLower(id)
 		entries := forward[key]
@@ -1022,6 +1038,10 @@ func applyOAuthModelAliasEntries(aliases []config.OAuthModelAlias, models []*Mod
 			}
 			if clone.Name != "" {
 				clone.Name = rewriteModelInfoName(clone.Name, id, mappedID)
+			}
+			if entry.maxContextLength > 0 {
+				clone.ContextLength = entry.maxContextLength
+				clone.MaxContextLength = entry.maxContextLength
 			}
 			out = append(out, &clone)
 			addedAlias = true

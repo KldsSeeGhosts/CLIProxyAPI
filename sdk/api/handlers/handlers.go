@@ -432,9 +432,10 @@ func (h *BaseAPIHandler) GetContextWithCancel(handler interfaces.APIHandler, c *
 	}
 	if c != nil && c.Request != nil {
 		newCtx = logging.WithClientRequestMetadata(newCtx, logging.ClientRequestMetadata{
-			ClientIP:      requestClientIP(c.Request),
-			XForwardedFor: strings.TrimSpace(strings.Join(c.Request.Header.Values("X-Forwarded-For"), ", ")),
-			UserAgent:     strings.TrimSpace(c.Request.UserAgent()),
+			ClientIP:         requestClientIP(c.Request),
+			XForwardedFor:    strings.TrimSpace(strings.Join(c.Request.Header.Values("X-Forwarded-For"), ", ")),
+			UserAgent:        strings.TrimSpace(c.Request.UserAgent()),
+			ClientOriginator: resolveClientOriginator(c.Request),
 		})
 	}
 	newCtx = logging.WithResponseStatusHolder(newCtx)
@@ -579,3 +580,42 @@ func appendAPIResponse(c *gin.Context, data []byte) {
 // APIHandlerCancelFunc is a function type for canceling an API handler's context.
 // It can optionally accept parameters, which are used for logging the response.
 type APIHandlerCancelFunc func(params ...interface{})
+
+func resolveClientOriginator(r *http.Request) string {
+	if r == nil {
+		return ""
+	}
+	for _, h := range []string{"Originator", "Client-Originator", "X-Originator", "X-Client-Originator"} {
+		if val := strings.TrimSpace(r.Header.Get(h)); val != "" {
+			return val
+		}
+	}
+	ua := strings.TrimSpace(r.UserAgent())
+	if ua == "" {
+		return ""
+	}
+	l := strings.ToLower(ua)
+	switch {
+	case strings.HasPrefix(l, "pi (") || strings.HasPrefix(l, "pi/"):
+		return "pi"
+	case strings.HasPrefix(l, "claude-cli") || strings.Contains(l, "claude-code"):
+		return "claude-code"
+	case strings.Contains(l, "codex desktop"):
+		return "Codex Desktop"
+	case strings.Contains(l, "codex-tui"):
+		return "codex-tui"
+	case strings.Contains(l, "codex_cli"):
+		return "codex-cli"
+	case strings.Contains(l, "codex_exec"):
+		return "codex_exec"
+	case strings.Contains(l, "windsurf"):
+		return "windsurf"
+	case strings.Contains(l, "deepseek"):
+		return "Deepseek"
+	case strings.Contains(l, "hermes") || strings.Contains(l, "openai/python") || strings.Contains(l, "asyncopenai/python"):
+		return "hermes"
+	case strings.Contains(l, "grok"):
+		return "grok-shell"
+	}
+	return ""
+}

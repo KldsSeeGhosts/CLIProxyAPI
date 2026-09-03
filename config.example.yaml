@@ -721,6 +721,7 @@ nonstream-keepalive-interval: 0
 #     - name: "gemini-pro-agent"                   # upstream Antigravity model id
 #       alias: "gemini-3.1-pro-preview"            # client-visible id (Gemini 3.1 Pro Preview)
 #       display-name: "Antigravity Gemini 3.1 Pro" # optional catalog display name
+#       max-context-length: 1048576          # optional true upstream input-context capacity
 #       fork: true
 #       force-mapping: true
 #   claude:
