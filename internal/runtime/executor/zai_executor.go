@@ -26,8 +26,20 @@ type ZAIExecutor struct {
 
 // NewZAIExecutor creates a new Z.AI executor. Both the embedded ClaudeExecutor
 // and the outer struct receive cfg so delegated calls have full configuration.
+// The embedded executor is configured with:
+//   - providerKey "zai" for usage attribution and thinking capabilities;
+//   - upstreamModelNormalizer mapping registry model IDs to the official
+//     ZCode client's wire casing (GLM-5.3, GLM-5.3-Flash, ...), so responses
+//     are rewritten back to the caller-visible ID automatically;
+//   - bodyNormalizer applying the ZCode harness body shape (metadata.user_id
+//     device/session JSON, effort-fixed thinking budgets, max_tokens).
 func NewZAIExecutor(cfg *config.Config) *ZAIExecutor {
-	return &ZAIExecutor{ClaudeExecutor: ClaudeExecutor{cfg: cfg, providerKey: "zai"}, cfg: cfg}
+	return &ZAIExecutor{ClaudeExecutor: ClaudeExecutor{
+		cfg:                     cfg,
+		providerKey:             "zai",
+		upstreamModelNormalizer: zcodeUpstreamModel,
+		bodyNormalizer:          zcodeNormalizeBody,
+	}, cfg: cfg}
 }
 
 // Identifier returns the executor identifier used to route auths with type "zai".
@@ -82,19 +94,38 @@ func (e *ZAIExecutor) cloneAuthWithBaseURL(auth *cliproxyauth.Auth) *cliproxyaut
 	return &cloned
 }
 
+// zcodePrepareContext enriches the request context for one zai execution:
+// the resolved ZCode session identity (for the body rewrite and session-stable
+// headers) and the cloned, profiled auth (for the send-boundary header rewrite).
+func (e *ZAIExecutor) zcodePrepareContext(ctx context.Context, auth *cliproxyauth.Auth, req cliproxyexecutor.Request, opts cliproxyexecutor.Options) (context.Context, *cliproxyauth.Auth) {
+	cloned := e.cloneAuthWithBaseURL(auth)
+	if !zcodeProfileEnabled(cloned) {
+		// Still attach the cloned auth: the base URL and auth scheme must apply
+		// even when the harness profile is off.
+		return context.WithValue(ctx, zcodeRequestAuthContextKey{}, cloned), cloned
+	}
+	identity := zcodeResolveSessionIdentity(opts.Headers, req.Payload, opts.Metadata, req.Metadata)
+	ctx = zcodeWithSessionContext(ctx, identity)
+	ctx = context.WithValue(ctx, zcodeRequestAuthContextKey{}, cloned)
+	return ctx, cloned
+}
+
 // Execute performs a non-streaming request against the Z.AI coding-plan endpoint.
 func (e *ZAIExecutor) Execute(ctx context.Context, auth *cliproxyauth.Auth, req cliproxyexecutor.Request, opts cliproxyexecutor.Options) (cliproxyexecutor.Response, error) {
-	return e.ClaudeExecutor.Execute(ctx, e.cloneAuthWithBaseURL(auth), req, opts)
+	ctx, cloned := e.zcodePrepareContext(ctx, auth, req, opts)
+	return e.ClaudeExecutor.Execute(ctx, cloned, req, opts)
 }
 
 // ExecuteStream performs a streaming request against the Z.AI coding-plan endpoint.
 func (e *ZAIExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.Auth, req cliproxyexecutor.Request, opts cliproxyexecutor.Options) (*cliproxyexecutor.StreamResult, error) {
-	return e.ClaudeExecutor.ExecuteStream(ctx, e.cloneAuthWithBaseURL(auth), req, opts)
+	ctx, cloned := e.zcodePrepareContext(ctx, auth, req, opts)
+	return e.ClaudeExecutor.ExecuteStream(ctx, cloned, req, opts)
 }
 
 // CountTokens proxies token counting to the Z.AI coding-plan endpoint.
 func (e *ZAIExecutor) CountTokens(ctx context.Context, auth *cliproxyauth.Auth, req cliproxyexecutor.Request, opts cliproxyexecutor.Options) (cliproxyexecutor.Response, error) {
-	return e.ClaudeExecutor.CountTokens(ctx, e.cloneAuthWithBaseURL(auth), req, opts)
+	ctx, cloned := e.zcodePrepareContext(ctx, auth, req, opts)
+	return e.ClaudeExecutor.CountTokens(ctx, cloned, req, opts)
 }
 
 // PrepareRequest injects Z.AI credentials into a raw HTTP request. It overrides
