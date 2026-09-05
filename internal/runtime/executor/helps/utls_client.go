@@ -7,6 +7,7 @@ import (
 	"io"
 	"net"
 	"net/http"
+	"net/url"
 	"strings"
 	"sync"
 	"time"
@@ -288,6 +289,116 @@ func cachedClaudeCodeRoundTripper(proxyURL string) http.RoundTripper {
 	})
 }
 
+// zaiRoundTripperCache bounds the Z.AI model-plane transport pool the same way
+// the Claude Code cache bounds its own: one entry per proxy URL.
+const zaiRoundTripperCacheCapacity = 64
+
+var zaiRoundTripperCache = internalcache.NewBoundedLRU[string, http.RoundTripper](
+	zaiRoundTripperCacheCapacity,
+	func(_ string, roundTripper http.RoundTripper) {
+		if transport, ok := roundTripper.(interface{ CloseIdleConnections() }); ok {
+			transport.CloseIdleConnections()
+		}
+	},
+)
+
+// cachedZAIModelRoundTripper returns the shared Z.AI model-plane transport for
+// one proxy URL.
+func cachedZAIModelRoundTripper(proxyURL string) http.RoundTripper {
+	return zaiRoundTripperCache.GetOrAdd(proxyURL, func() http.RoundTripper {
+		return newZAIModelRoundTripper(proxyURL)
+	})
+}
+
+// newZAIModelRoundTripper builds the transport for api.z.ai / open.bigmodel.cn
+// model requests. The official ZCode client sends its model traffic from the
+// Electron host's bundled Node runtime, so the transport reproduces the same
+// Node/OpenSSL TLS ClientHello (the shared claudeCode spec - both clients are
+// Node) and orders headers like undici does (see
+// executor.zcodeRequestHeaderOrder). Header ordering runs on the wire bytes,
+// after zcodeFinalizeUpstreamRequest lowercased the names, so the order list
+// matches the finalized request rather than Go's canonical casing.
+func newZAIModelRoundTripper(proxyURL string) http.RoundTripper {
+	sessionCache := tls.NewLRUClientSessionCache(claudeCodeSessionCacheCapacity)
+	var dialer proxy.Dialer = proxy.Direct
+	if proxyURL != "" {
+		proxyDialer, mode, errBuild := proxyutil.BuildDialer(proxyURL)
+		if errBuild != nil {
+			log.Errorf("zai tls: failed to configure proxy dialer for %q: %v", proxyutil.Redact(proxyURL), errBuild)
+		} else if mode != proxyutil.ModeInherit && proxyDialer != nil {
+			dialer = proxyDialer
+		}
+	}
+
+	transport := &http.Transport{
+		ForceAttemptHTTP2: false,
+		DialTLSContext: func(ctx context.Context, network, addr string) (net.Conn, error) {
+			var (
+				conn net.Conn
+				err  error
+			)
+			if contextDialer, ok := dialer.(proxy.ContextDialer); ok {
+				conn, err = contextDialer.DialContext(ctx, network, addr)
+			} else {
+				conn, err = dialer.Dial(network, addr)
+			}
+			if err != nil {
+				return nil, fmt.Errorf("zai tls: dial upstream: %w", err)
+			}
+
+			host, _, errSplit := net.SplitHostPort(addr)
+			if errSplit != nil {
+				if errClose := conn.Close(); errClose != nil {
+					log.Debugf("zai tls: close failed connection: %v", errClose)
+				}
+				return nil, fmt.Errorf("zai tls: split upstream address: %w", errSplit)
+			}
+			tlsConn := tls.UClient(conn, newClaudeCodeTLSConfig(host, sessionCache), tls.HelloCustom)
+			if errPreset := tlsConn.ApplyPreset(claudeCodeTLSClientHelloSpec()); errPreset != nil {
+				if errClose := tlsConn.Close(); errClose != nil {
+					log.Debugf("zai tls: close connection after preset failure: %v", errClose)
+				}
+				return nil, fmt.Errorf("zai tls: apply Node ClientHello: %w", errPreset)
+			}
+			if errHandshake := tlsConn.HandshakeContext(ctx); errHandshake != nil {
+				if errClose := tlsConn.Close(); errClose != nil {
+					log.Debugf("zai tls: close connection after handshake failure: %v", errHandshake)
+				}
+				return nil, fmt.Errorf("zai tls: handshake upstream: %w", errHandshake)
+			}
+			return httpwire.NewOrderedRequestConn(
+				httpwire.NewCasingConn(tlsConn, zaiModelHeaderCasing),
+				zaiModelRequestHeaderOrder,
+			), nil
+		},
+	}
+	return transport
+}
+
+// zaiModelRequestHeaderOrder delegates to the executor package's undici order
+// for ZCode-emulated requests. The helps package cannot import the executor
+// package (executor imports helps), so the order is registered here at init by
+// the executor package; until registered, no reordering happens.
+var zaiModelRequestHeaderOrder httpwire.RequestHeaderOrder
+
+// zaiModelHeaderCasing lowercases every header name except Content-Type on the
+// wire. The official client's fetch (undici) preserves the casing its caller
+// inserted, and every header it sends except the AI SDK's literal
+// {"Content-Type": ...} key passes through a Headers object, which lowercases
+// names - so the official wire is lowercase except Content-Type.
+func zaiModelHeaderCasing(_, _, name string) string {
+	if strings.EqualFold(name, "Content-Type") {
+		return "Content-Type"
+	}
+	return strings.ToLower(name)
+}
+
+// SetZAIModelRequestHeaderOrder installs the undici header order used by the
+// Z.AI model transport. Called once from the executor package's init.
+func SetZAIModelRequestHeaderOrder(order httpwire.RequestHeaderOrder) {
+	zaiModelRequestHeaderOrder = order
+}
+
 func newClaudeCodeRoundTripper(proxyURL string) http.RoundTripper {
 	// The cache is scoped to this round tripper, which is already keyed by proxy,
 	// so resumption never crosses proxy boundaries.
@@ -349,6 +460,7 @@ func newClaudeCodeRoundTripper(proxyURL string) http.RoundTripper {
 type fallbackRoundTripper struct {
 	anthropic http.RoundTripper
 	chrome    http.RoundTripper
+	zai       http.RoundTripper
 	fallback  http.RoundTripper
 }
 
@@ -359,7 +471,23 @@ func (f *fallbackRoundTripper) RoundTrip(req *http.Request) (*http.Response, err
 	if req.URL.Scheme == "https" && strings.EqualFold(req.URL.Hostname(), "chatgpt.com") {
 		return f.chrome.RoundTrip(req)
 	}
+	if isZAIUpstreamURL(req.URL) {
+		return f.zai.RoundTrip(req)
+	}
 	return f.fallback.RoundTrip(req)
+}
+
+// isZAIUpstreamURL reports whether the request targets the Z.AI or BigModel
+// coding-plan endpoints. The official ZCode client is an Electron host whose
+// model requests originate from its bundled Node runtime, so the upstream
+// sees a Node/OpenSSL TLS ClientHello; a Go ClientHello is a strong
+// non-client fingerprint at the WAF layer.
+func isZAIUpstreamURL(u *url.URL) bool {
+	if u == nil || !strings.EqualFold(u.Scheme, "https") {
+		return false
+	}
+	host := strings.ToLower(u.Hostname())
+	return host == "api.z.ai" || host == "open.bigmodel.cn"
 }
 
 // NewUtlsHTTPClient creates an HTTP client using provider-specific TLS
@@ -382,6 +510,7 @@ func NewUtlsHTTPClient(ctx context.Context, cfg *config.Config, auth *cliproxyau
 
 	var chromeRT http.RoundTripper = newUtlsRoundTripper(proxyURL)
 	var anthropicRT http.RoundTripper = cachedClaudeCodeRoundTripper(proxyURL)
+	var zaiRT http.RoundTripper = cachedZAIModelRoundTripper(proxyURL)
 	var standardTransport http.RoundTripper = http.DefaultTransport
 	if proxyURL != "" {
 		if transport := buildProxyTransport(proxyURL); transport != nil {
@@ -397,6 +526,7 @@ func NewUtlsHTTPClient(ctx context.Context, cfg *config.Config, auth *cliproxyau
 		Transport: &fallbackRoundTripper{
 			anthropic: anthropicRT,
 			chrome:    chromeRT,
+			zai:       zaiRT,
 			fallback:  standardTransport,
 		},
 	}

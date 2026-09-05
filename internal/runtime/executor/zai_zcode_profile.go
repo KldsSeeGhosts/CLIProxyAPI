@@ -50,6 +50,20 @@ const (
 	// zcodeOsVersion mirrors the kernel release of the captured client host.
 	zcodeOsVersion = "7.2.2-1-cachyos"
 
+	// The wire user-agent is assembled by three chained xm() calls in the
+	// official bundle, each appending one telemetry suffix to the value the
+	// previous stage set:
+	//   1. the Anthropic provider factory (het) appends "ai-sdk/anthropic/3.0.81";
+	//   2. the shared request layer (lir/postJsonToApi) appends
+	//      "ai-sdk/provider-utils/4.0.27" and the runtime token from wye(),
+	//      which in the Electron host is "runtime/node.js/v24.14.0"
+	//      (Electron 41 bundles node 24.14.0).
+	// The model-io records store the provider-stage value (ZCode/<version>)
+	// only, which is why the bare UA is not the right wire value.
+	zcodeSDKAnthropicVersion = "ai-sdk/anthropic/3.0.81"
+	zcodeSDKProviderUtilsUA  = "ai-sdk/provider-utils/4.0.27"
+	zcodeRuntimeUA            = "runtime/node.js/v24.14.0"
+
 	// Session types: main-agent turns send "main"; background helpers
 	// (compaction, titles) send "other".
 	zcodeSessionTypeMain  = "main"
@@ -401,6 +415,21 @@ func zcodeDeviceID(auth *cliproxyauth.Auth) string {
 // dual x-api-key + Bearer authorization the official client sends, and strips
 // the Claude-only artifacts (x-stainless, x-app, anthropic-beta, ?beta=true)
 // that Z.AI never sees from a real ZCode client.
+//
+// The exact wire shape was derived from the official bundle's header chain
+// (gin/Fvo source headers -> het's xm() -> sfr's brt merge -> postJsonToApi)
+// and verified against a raw-socket capture of the same fetch (undici) stack:
+//
+//	host, connection: keep-alive, then the header map's insertion order
+//	(Content-Type first, then the sorted-by-lowercase-name provider headers,
+//	then the per-request attribution headers), then undici's trailing defaults
+//	(accept, accept-language, sec-fetch-mode, accept-encoding, content-length).
+//
+// Go sorts headers bytewise and writes host/content-length outside the
+// block; since every emulated name is lowercase except Content-Type, Go's
+// sorted order equals undici's insertion order except for the trailing
+// defaults, which this pass moves to the undici positions via the ordered
+// connection installed by the zai transport.
 func zcodeFinalizeUpstreamRequest(r *http.Request, auth *cliproxyauth.Auth) {
 	if r == nil || !zcodeProfileEnabled(auth) {
 		return
@@ -425,9 +454,13 @@ func zcodeFinalizeUpstreamRequest(r *http.Request, auth *cliproxyauth.Auth) {
 		}
 	}
 
-	// Identity headers (exact official client values).
+	// Identity headers (exact official client values). The official client
+	// builds these PascalCase (gin) but they pass through xm()'s Headers
+	// object, whose iteration lowercases every name, so the wire value is
+	// lowercase. Collect via Set (canonicalising) and lowercase the whole map
+	// at the end, like the official chain does.
 	r.Header.Set("HTTP-Referer", zcodeHTTPReferer)
-	r.Header.Set("User-Agent", "ZCode/"+zcodeAppVersion)
+	r.Header.Set("User-Agent", "ZCode/"+zcodeAppVersion+" "+zcodeSDKAnthropicVersion+" "+zcodeSDKProviderUtilsUA+" "+zcodeRuntimeUA)
 	r.Header.Set("X-Zcode-App-Version", zcodeAppVersion)
 	r.Header.Set("X-Title", zcodeSourceTitle)
 	r.Header.Set("X-Release-Channel", zcodeReleaseChannel)
@@ -449,6 +482,17 @@ func zcodeFinalizeUpstreamRequest(r *http.Request, auth *cliproxyauth.Auth) {
 	}
 	r.Header.Set("X-Zcode-Session-Type", zcodeSessionTypeMain)
 
+	// Undici's trailing defaults. The AI SDK's postJsonToApi sets Content-Type
+	// only; fetch adds accept, accept-language, sec-fetch-mode and
+	// accept-encoding after the caller's headers. Go would otherwise send
+	// Accept-Encoding: identity (and no sec-fetch-mode). The Claude response
+	// pipeline decompresses Content-Encoding: gzip responses, so allowing
+	// gzip is safe end to end.
+	r.Header.Set("Accept", "*/*")
+	r.Header.Set("Accept-Language", "*")
+	r.Header.Set("Sec-Fetch-Mode", "cors")
+	r.Header.Set("Accept-Encoding", "gzip, deflate")
+
 	// Authorization: the official client sends the minted coding-plan key in
 	// both x-api-key and Authorization: Bearer (the SDK sets x-api-key and the
 	// provider wrapper adds the Bearer header).
@@ -461,5 +505,50 @@ func zcodeFinalizeUpstreamRequest(r *http.Request, auth *cliproxyauth.Auth) {
 	// an Anthropic-specific convention.
 	if r.URL != nil {
 		r.URL.RawQuery = ""
+	}
+
+	// Header-name casing is normalised on the wire by the Z.AI model transport
+	// (see helps.zaiModelHeaderCasing): every name except Content-Type goes out
+	// lowercase, matching the official client's Headers-object normalisation.
+	// Keep canonical names here so Go's own User-Agent/Host handling and every
+	// Header.Get in the pipeline stay functional.
+}
+
+// zcodeRequestHeaderOrder returns the undici header order for one zai
+// upstream request. Undici emits the caller's header map in insertion order
+// (Content-Type first, then the Headers-sorted provider names), then appends
+// its own defaults; Go emits a bytewise sort of the same lowercase names,
+// which is identical up to undici's trailing block, so only the trailing
+// defaults need explicit positioning. Content-Length is written by Go
+// outside the ordered block and cannot be moved.
+func zcodeRequestHeaderOrder(method, requestTarget string) []string {
+	return []string{
+		"Host",
+		"Connection",
+		"Content-Type",
+		"anthropic-version",
+		"authorization",
+		"http-referer",
+		"user-agent",
+		"x-api-key",
+		"x-client-language",
+		"x-client-timezone",
+		"x-os-category",
+		"x-os-version",
+		"x-platform",
+		"x-release-channel",
+		"x-title",
+		"x-zcode-agent",
+		"x-zcode-app-version",
+		"x-request-id",
+		"x-zcode-session-type",
+		"x-zcode-trace-id",
+		"x-query-id",
+		"x-session-id",
+		"accept",
+		"accept-language",
+		"sec-fetch-mode",
+		"accept-encoding",
+		"Content-Length",
 	}
 }

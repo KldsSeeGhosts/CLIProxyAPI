@@ -192,8 +192,9 @@ func TestZcodeFinalizeUpstreamRequestHeaders(t *testing.T) {
 
 	zcodeFinalizeUpstreamRequest(req, auth)
 
-	if got := req.Header.Get("User-Agent"); got != "ZCode/3.10.1" {
-		t.Errorf("User-Agent = %q, want ZCode/3.10.1", got)
+	expectedUA := "ZCode/3.10.1 ai-sdk/anthropic/3.0.81 ai-sdk/provider-utils/4.0.27 runtime/node.js/v24.14.0"
+	if got := req.Header.Get("User-Agent"); got != expectedUA {
+		t.Errorf("User-Agent = %q, want %q", got, expectedUA)
 	}
 	if got := req.Header.Get("HTTP-Referer"); got != "https://zcode.z.ai" {
 		t.Errorf("HTTP-Referer = %q", got)

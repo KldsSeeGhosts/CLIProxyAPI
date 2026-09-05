@@ -294,3 +294,135 @@ func writeAll(writer io.Writer, data []byte) (int, error) {
 	}
 	return total, nil
 }
+
+// HeaderNameCasing rewrites one request header name to its wire form. The
+// returned string replaces the original name byte-for-byte; empty means keep
+// the original. Only the name (up to the colon) is affected.
+type HeaderNameCasing func(method, requestTarget, name string) string
+
+// NewCasingConn wraps conn and normalizes HTTP/1.1 request header-name casing
+// (and nothing else). Use it below an ordered conn or instead of one when only
+// casing must change.
+func NewCasingConn(conn net.Conn, casing HeaderNameCasing) net.Conn {
+	if conn == nil || casing == nil {
+		return conn
+	}
+	return &casingConn{Conn: conn, casing: casing}
+}
+
+type casingConn struct {
+	net.Conn
+	casing HeaderNameCasing
+
+	mu            sync.Mutex
+	header        []byte
+	bodyRemaining int64
+	chunked       *chunkedRequestTracker
+}
+
+func (c *casingConn) Write(p []byte) (int, error) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+
+	originalLength := len(p)
+	consumed := 0
+	remaining := p
+	for len(remaining) > 0 {
+		if c.bodyRemaining > 0 {
+			bodyBytes := min(int64(len(remaining)), c.bodyRemaining)
+			written, errWrite := writeAll(c.Conn, remaining[:bodyBytes])
+			consumed += written
+			c.bodyRemaining -= int64(written)
+			if errWrite != nil {
+				return consumed, errWrite
+			}
+			remaining = remaining[bodyBytes:]
+			continue
+		}
+		if c.chunked != nil {
+			preview := c.chunked.clone()
+			chunkBytes, _, errChunk := preview.consume(remaining)
+			if errChunk != nil {
+				return consumed, errChunk
+			}
+			written, errWrite := writeAll(c.Conn, remaining[:chunkBytes])
+			consumed += written
+			_, completed, errConsume := c.chunked.consume(remaining[:written])
+			if errConsume != nil {
+				return consumed, errConsume
+			}
+			if completed {
+				c.chunked = nil
+			}
+			if errWrite != nil {
+				return consumed, errWrite
+			}
+			remaining = remaining[chunkBytes:]
+			continue
+		}
+
+		previousHeaderLength := len(c.header)
+		c.header = append(c.header, remaining...)
+		headerEnd := bytes.Index(c.header, []byte("\r\n\r\n"))
+		if headerEnd < 0 {
+			if len(c.header) > maxBufferedRequestHeader {
+				return consumed, fmt.Errorf("httpwire: request header exceeds %d bytes", maxBufferedRequestHeader)
+			}
+			return originalLength, nil
+		}
+
+		headerEnd += len("\r\n\r\n")
+		header := c.header[:headerEnd]
+		afterHeader := append([]byte(nil), c.header[headerEnd:]...)
+		c.header = nil
+		currentHeaderBytes := min(len(remaining), max(0, headerEnd-previousHeaderLength))
+
+		rewritten, contentLength, chunked := rewriteHeaderCasing(header, c.casing)
+		if _, errWrite := writeAll(c.Conn, rewritten); errWrite != nil {
+			return originalLength, errWrite
+		}
+		consumed += currentHeaderBytes
+		remaining = afterHeader
+		if chunked {
+			c.chunked = newChunkedRequestTracker()
+			continue
+		}
+		c.bodyRemaining = contentLength
+	}
+	return originalLength, nil
+}
+
+// rewriteHeaderCasing rewrites the header-name portion of every header line
+// through the casing function, preserving values, order and the request line.
+func rewriteHeaderCasing(header []byte, casing HeaderNameCasing) ([]byte, int64, bool) {
+	lines := bytes.Split(header[:len(header)-len("\r\n\r\n")], []byte("\r\n"))
+	if len(lines) == 0 {
+		return header, 0, false
+	}
+	requestParts := strings.SplitN(string(lines[0]), " ", 3)
+	if len(requestParts) != 3 {
+		return header, requestContentLength(lines[1:]), requestUsesChunkedEncoding(lines[1:])
+	}
+
+	var output bytes.Buffer
+	output.Write(lines[0])
+	output.WriteString("\r\n")
+	for _, line := range lines[1:] {
+		colon := bytes.IndexByte(line, ':')
+		if colon <= 0 {
+			output.Write(line)
+			output.WriteString("\r\n")
+			continue
+		}
+		name := casing(requestParts[0], requestParts[1], string(line[:colon]))
+		if name == "" {
+			output.Write(line)
+		} else {
+			output.WriteString(name)
+			output.Write(line[colon:])
+		}
+		output.WriteString("\r\n")
+	}
+	output.WriteString("\r\n")
+	return output.Bytes(), requestContentLength(lines[1:]), requestUsesChunkedEncoding(lines[1:])
+}

@@ -7,6 +7,7 @@ import (
 
 	zaiauth "github.com/router-for-me/CLIProxyAPI/v7/internal/auth/zai"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/config"
+	"github.com/router-for-me/CLIProxyAPI/v7/internal/runtime/executor/helps"
 	cliproxyauth "github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/auth"
 	cliproxyexecutor "github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/executor"
 )
@@ -148,4 +149,11 @@ func (e *ZAIExecutor) HttpRequest(ctx context.Context, auth *cliproxyauth.Auth, 
 // flow does not return a refresh token. Re-login is required if it is revoked.
 func (e *ZAIExecutor) Refresh(_ context.Context, auth *cliproxyauth.Auth) (*cliproxyauth.Auth, error) {
 	return auth, nil
+}
+
+// init registers the undici header order for Z.AI model requests with the
+// transport helper. The helps package cannot import the executor package
+// (executor imports helps), so the order is handed over here once at startup.
+func init() {
+	helps.SetZAIModelRequestHeaderOrder(zcodeRequestHeaderOrder)
 }

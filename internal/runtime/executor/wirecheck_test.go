@@ -43,34 +43,45 @@ func TestWireHeadersAfterSendBoundary(t *testing.T) {
 	if gotURL != "/v1/messages" {
 		t.Errorf("URL = %q, want /v1/messages (beta suffix stripped)", gotURL)
 	}
+	get := func(name string) string {
+		if v, ok := got[name]; ok && len(v) > 0 {
+			return v[0]
+		}
+		return got.Get(name)
+	}
 	for _, check := range []struct{ name, want string }{
-		{"User-Agent", "ZCode/3.10.1"},
-		{"HTTP-Referer", "https://zcode.z.ai"},
-		{"X-Zcode-App-Version", "3.10.1"},
-		{"X-Title", "Z Code@electron"},
-		{"X-Release-Channel", "production"},
-		{"X-Client-Language", "en-US"},
-		{"X-Client-Timezone", "America/Detroit"},
-		{"X-Platform", "linux-x64"},
-		{"X-Os-Category", "linux"},
-		{"X-Os-Version", "7.2.2-1-cachyos"},
-		{"X-Zcode-Agent", "glm"},
-		{"X-Zcode-Session-Type", "main"},
-		{"X-Zcode-Trace-Id", "trace-1"},
-		{"X-Session-Id", "sess-1"},
-		{"X-Api-Key", "key.secret"},
-		{"Authorization", "Bearer key.secret"},
+		{"user-agent", "ZCode/3.10.1 ai-sdk/anthropic/3.0.81 ai-sdk/provider-utils/4.0.27 runtime/node.js/v24.14.0"},
+		{"http-referer", "https://zcode.z.ai"},
+		{"x-zcode-app-version", "3.10.1"},
+		{"x-title", "Z Code@electron"},
+		{"x-release-channel", "production"},
+		{"x-client-language", "en-US"},
+		{"x-client-timezone", "America/Detroit"},
+		{"x-platform", "linux-x64"},
+		{"x-os-category", "linux"},
+		{"x-os-version", "7.2.2-1-cachyos"},
+		{"x-zcode-agent", "glm"},
+		{"x-zcode-session-type", "main"},
+		{"x-zcode-trace-id", "trace-1"},
+		{"x-session-id", "sess-1"},
+		{"x-api-key", "key.secret"},
+		{"authorization", "Bearer key.secret"},
+		{"accept", "*/*"},
+		{"accept-language", "*"},
+		{"sec-fetch-mode", "cors"},
+		{"accept-encoding", "gzip, deflate"},
 	} {
-		if gotValue := got.Get(check.name); gotValue != check.want {
+		if gotValue := get(check.name); gotValue != check.want {
 			t.Errorf("wire %s = %q, want %q", check.name, gotValue, check.want)
 		}
 	}
 	for _, banned := range []string{"X-App", "X-Stainless-Lang", "Anthropic-Beta"} {
-		if got.Get(banned) != "" {
+		if get(banned) != "" {
 			t.Errorf("wire still carries %s", banned)
 		}
 	}
-	if got.Get("X-Request-Id") == "" || got.Get("X-Query-Id") == "" {
+	if get("x-request-id") == "" || get("x-query-id") == "" {
 		t.Error("missing per-request UUID headers")
 	}
 }
+
