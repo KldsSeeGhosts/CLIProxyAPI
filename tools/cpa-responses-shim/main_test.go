@@ -1,7 +1,9 @@
 package main
 
 import (
+	"bytes"
 	"encoding/json"
+	"strings"
 	"testing"
 )
 
@@ -118,5 +120,147 @@ func TestRewriteResponseJSONLeavesOtherModelsUntouched(t *testing.T) {
 func TestRewriteResponseJSONRejectsInvalidJSON(t *testing.T) {
 	if _, _, err := rewriteResponseJSON([]byte(`{"model":`)); err == nil {
 		t.Fatal("rewriteResponseJSON() error = nil, want invalid JSON error")
+	}
+}
+
+func TestRewriteResponseJSONRemapsDeveloperRoleForOmenAlpha(t *testing.T) {
+	input := []byte(`{
+		"model":"opencode-go/omen-alpha",
+		"messages":[
+			{"role":"developer","content":"You are an expert coding assistant."},
+			{"role":"user","content":[{"type":"text","text":"hello"}]},
+			{"role":"assistant","content":"hi"}
+		]
+	}`)
+
+	out, changed, err := rewriteResponseJSON(input)
+	if err != nil {
+		t.Fatalf("rewriteResponseJSON() error = %v", err)
+	}
+	if !changed {
+		t.Fatal("rewriteResponseJSON() changed = false, want true")
+	}
+	root := decodeTestJSON(t, out)
+	messages := root["messages"].([]any)
+	if messages[0].(map[string]any)["role"] != "system" {
+		t.Fatalf("developer role was not remapped: %#v", messages[0])
+	}
+	if messages[0].(map[string]any)["content"] != "You are an expert coding assistant." {
+		t.Fatal("system prompt content was altered")
+	}
+	if messages[1].(map[string]any)["role"] != "user" || messages[2].(map[string]any)["role"] != "assistant" {
+		t.Fatal("non-developer roles were altered")
+	}
+}
+
+func TestRewriteResponseJSONLeavesOtherChatModelsUntouched(t *testing.T) {
+	input := []byte(`{"model":"gpt-5.6-sol","messages":[{"role":"developer","content":"sys"}]}`)
+	out, changed, err := rewriteResponseJSON(input)
+	if err != nil {
+		t.Fatalf("rewriteResponseJSON() error = %v", err)
+	}
+	if changed {
+		t.Fatal("rewriteResponseJSON() changed a non-OpenCode model")
+	}
+	if string(out) != string(input) {
+		t.Fatalf("non-target payload changed: %s", out)
+	}
+}
+
+func TestMuseResponseTransformation(t *testing.T) {
+	reqJSON := []byte(`{
+		"model": "opencode-go/muse-spark-1.3-contributor",
+		"tools": [
+			{
+				"type": "namespace",
+				"name": "functions",
+				"tools": [
+					{"type": "function", "name": "exec_command", "description": "run command"},
+					{"type": "custom", "name": "apply_patch", "description": "patch file"}
+				]
+			},
+			{
+				"type": "namespace",
+				"name": "collaboration",
+				"tools": [
+					{"type": "function", "name": "spawn_agent", "description": "spawn agent"}
+				]
+			}
+		]
+	}`)
+
+	var reqRoot map[string]any
+	if err := json.Unmarshal(reqJSON, &reqRoot); err != nil {
+		t.Fatalf("unmarshal reqJSON: %v", err)
+	}
+	ids := museToolIdentities(reqRoot)
+
+	// Verify identity extraction
+	if id, ok := ids["functions__exec_command"]; !ok || id.Name != "exec_command" || id.Namespace != "functions" {
+		t.Fatalf("expected functions__exec_command mapped, got: %+v", id)
+	}
+	if id, ok := ids["functions__apply_patch"]; !ok || id.Name != "apply_patch" || id.Namespace != "functions" || id.Kind != "custom" {
+		t.Fatalf("expected functions__apply_patch custom mapped, got: %+v", id)
+	}
+	if id, ok := ids["collaboration__spawn_agent"]; !ok || id.Name != "spawn_agent" || id.Namespace != "collaboration" {
+		t.Fatalf("expected collaboration__spawn_agent mapped, got: %+v", id)
+	}
+
+	// Test JSON non-streaming restoration
+	jsonResp := []byte(`{
+		"id": "resp-1",
+		"output": [
+			{
+				"type": "function_call",
+				"name": "functions__exec_command",
+				"arguments": "{\"cmd\":\"ls\"}"
+			},
+			{
+				"type": "function_call",
+				"name": "functions__apply_patch",
+				"arguments": "{\"input\":\"*** patch ***\"}"
+			}
+		]
+	}`)
+
+	var respRoot map[string]any
+	if err := json.Unmarshal(jsonResp, &respRoot); err != nil {
+		t.Fatalf("unmarshal jsonResp: %v", err)
+	}
+	restoreMuseOutput(respRoot, ids)
+
+	outSlice := respRoot["output"].([]any)
+	fc := outSlice[0].(map[string]any)
+	if fc["name"] != "exec_command" || fc["namespace"] != "functions" {
+		t.Fatalf("expected exec_command with namespace functions, got: %+v", fc)
+	}
+
+	ctc := outSlice[1].(map[string]any)
+	if ctc["name"] != "apply_patch" || ctc["namespace"] != "functions" || ctc["type"] != "custom_tool_call" || ctc["input"] != "*** patch ***" {
+		t.Fatalf("expected custom_tool_call apply_patch, got: %+v", ctc)
+	}
+
+	// Test SSE streaming translation
+	sseInput := "data: {\"type\":\"response.output_item.added\",\"item\":{\"id\":\"fc_1\",\"type\":\"function_call\",\"name\":\"functions__exec_command\"}}\n\n" +
+		"data: {\"type\":\"response.function_call_arguments.done\",\"name\":\"functions__exec_command\",\"arguments\":\"{\\\"cmd\\\":\\\"ls\\\"}\"}\n\n" +
+		"data: {\"type\":\"response.output_item.done\",\"item\":{\"id\":\"fc_1\",\"type\":\"function_call\",\"name\":\"functions__exec_command\",\"arguments\":\"{\\\"cmd\\\":\\\"ls\\\"}\"}}\n\n" +
+		"data: {\"type\":\"response.output_item.added\",\"item\":{\"id\":\"ctc_1\",\"type\":\"function_call\",\"name\":\"functions__apply_patch\"}}\n\n" +
+		"data: {\"type\":\"response.function_call_arguments.done\",\"item_id\":\"ctc_1\",\"name\":\"functions__apply_patch\",\"arguments\":\"{\\\"input\\\":\\\"diff\\\"}\"}\n\n" +
+		"data: {\"type\":\"response.output_item.done\",\"item\":{\"id\":\"ctc_1\",\"type\":\"function_call\",\"name\":\"functions__apply_patch\",\"arguments\":\"{\\\"input\\\":\\\"diff\\\"}\"}}\n\n"
+
+	var outBuf bytes.Buffer
+	if err := translateMuseSSE(strings.NewReader(sseInput), &outBuf, ids); err != nil {
+		t.Fatalf("translateMuseSSE error: %v", err)
+	}
+
+	outStr := outBuf.String()
+	if !strings.Contains(outStr, `"name":"exec_command"`) || !strings.Contains(outStr, `"namespace":"functions"`) {
+		t.Fatalf("expected restored exec_command in SSE output: %s", outStr)
+	}
+	if strings.Contains(outStr, "functions__exec_command") {
+		t.Fatalf("found un-restored functions__exec_command in SSE output: %s", outStr)
+	}
+	if !strings.Contains(outStr, `"type":"custom_tool_call"`) || !strings.Contains(outStr, `"input":"diff"`) {
+		t.Fatalf("expected custom_tool_call in SSE output: %s", outStr)
 	}
 }

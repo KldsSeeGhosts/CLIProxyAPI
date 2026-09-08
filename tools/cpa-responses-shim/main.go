@@ -1,15 +1,17 @@
 // Command cpa-responses-shim keeps a custom CLIProxyAPI binary in place while
-// normalizing the two request shapes that strict third-party Responses
-// providers reject:
+// normalizing the request shapes that strict third-party upstreams reject:
 //
 //   - OpenCode Go does not understand Codex Desktop's additional_tools input
 //     item or namespace declarations.
+//   - OpenCode Go (Zen endpoint, e.g. omen-alpha) rejects the OpenAI
+//     "developer" message role with "[1214] Incorrect role information";
+//     developer messages are remapped to "system", which it accepts.
 //   - Older Gemini executors can replay stale/foreign encrypted_content fields
 //     and receive "Invalid thought signature" from the upstream API.
 //
-// The shim is intentionally a transparent reverse proxy. Only POST requests
-// to /v1/responses are inspected; every other method/path, including
-// WebSockets, is forwarded unchanged to the configured backend.
+// The shim normalizes selected provider requests and restores Muse Responses
+// tool identities on the return path. Other responses and WebSocket traffic
+// are forwarded unchanged to the configured backend.
 package main
 
 import (
@@ -87,6 +89,7 @@ func run(opts options) error {
 	}
 
 	proxy := httputil.NewSingleHostReverseProxy(backendURL)
+	proxy.ModifyResponse = museModifyResponse
 	proxy.ErrorLog = log.New(os.Stderr, "cpa-responses-shim proxy: ", log.LstdFlags)
 	handler := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if shouldRewrite(r) {
@@ -165,6 +168,13 @@ func rewriteResponsesRequest(r *http.Request) error {
 	if int64(len(body)) > maxBodyBytes {
 		return errBodyTooLarge
 	}
+	if isResponsesPath(r.URL.Path) {
+		var original map[string]any
+		if json.Unmarshal(body, &original) == nil && isMuseModel(stringValue(original["model"])) {
+			identities := museToolIdentities(original)
+			*r = *r.WithContext(context.WithValue(r.Context(), museIdentityKey{}, identities))
+		}
+	}
 	rewritten, changed, err := rewriteResponseJSON(body)
 	if err != nil {
 		return fmt.Errorf("decode request body: %w", err)
@@ -180,6 +190,11 @@ func rewriteResponsesRequest(r *http.Request) error {
 	r.Header.Set("Content-Length", fmt.Sprintf("%d", len(rewritten)))
 	r.Header.Del("Transfer-Encoding")
 	return nil
+}
+
+func isResponsesPath(path string) bool {
+	trimmed := strings.TrimSuffix(strings.TrimSpace(path), "/")
+	return trimmed == "/v1/responses" || trimmed == "/responses"
 }
 
 // rewriteResponseJSON rewrites only the request models that need compatibility
@@ -204,7 +219,11 @@ func rewriteResponseJSON(body []byte) ([]byte, bool, error) {
 	}
 	if isMuseModel(model) {
 		changed = sanitizeMuseContextManagement(root) || changed
+		changed = flattenMuseReplay(root, museToolIdentities(root)) || changed
 		changed = flattenMuseTools(root) || changed
+	}
+	if isOpenCodeGoChatModel(model) {
+		changed = normalizeOpenCodeChatRoles(root) || changed
 	}
 	if !changed {
 		return body, false, nil
@@ -226,6 +245,35 @@ func isMuseModel(model string) bool {
 	return strings.Contains(model, "muse-spark") ||
 		strings.Contains(model, "opencode-go") ||
 		strings.Contains(model, "opencode")
+}
+
+func isOpenCodeGoChatModel(model string) bool {
+	model = strings.ToLower(strings.TrimSpace(model))
+	return strings.Contains(model, "opencode") || strings.Contains(model, "omen")
+}
+
+// normalizeOpenCodeChatRoles remaps the OpenAI "developer" message role to
+// "system" for OpenCode Go chat-completions requests. The Zen endpoint
+// strictly validates roles and rejects "developer" with
+// "[1214] Incorrect role information". "system" carries the same
+// semantics and is accepted by every upstream.
+func normalizeOpenCodeChatRoles(root map[string]any) bool {
+	messages, ok := root["messages"].([]any)
+	if !ok {
+		return false
+	}
+	changed := false
+	for _, item := range messages {
+		msg, ok := item.(map[string]any)
+		if !ok {
+			continue
+		}
+		if strings.EqualFold(strings.TrimSpace(stringValue(msg["role"])), "developer") {
+			msg["role"] = "system"
+			changed = true
+		}
+	}
+	return changed
 }
 
 // sanitizeMuseContextManagement removes map-shaped context_management objects
@@ -269,10 +317,7 @@ func stripGeminiReplayFields(value any) bool {
 }
 
 func flattenMuseTools(root map[string]any) bool {
-	input, ok := root["input"].([]any)
-	if !ok {
-		return false
-	}
+	input, hasInputArray := root["input"].([]any)
 
 	topTools := rawToolSlice(root["tools"])
 	merged := make([]any, 0, len(topTools))
@@ -292,7 +337,9 @@ func flattenMuseTools(root map[string]any) bool {
 	}
 
 	rewrittenInput := make([]any, 0, len(input))
-	changed := false
+	beforeTools, _ := json.Marshal(root["tools"])
+	afterTools, _ := json.Marshal(merged)
+	changed := !bytes.Equal(beforeTools, afterTools) && len(topTools) > 0
 	for _, item := range input {
 		itemMap, ok := item.(map[string]any)
 		if !ok || strings.TrimSpace(stringValue(itemMap["type"])) != "additional_tools" {
@@ -317,7 +364,9 @@ func flattenMuseTools(root map[string]any) bool {
 	if !changed {
 		return false
 	}
-	root["input"] = rewrittenInput
+	if hasInputArray {
+		root["input"] = rewrittenInput
+	}
 	if len(merged) == 0 {
 		delete(root, "tools")
 	} else {
