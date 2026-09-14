@@ -1356,6 +1356,17 @@ func (m *Manager) pickNextLegacy(ctx context.Context, provider, model string, op
 		return auth, exec, err
 	}
 
+	// Honor the shared excluded_auth_ids metadata so selection callers outside the
+	// execution loop (e.g. websocket session bootstrap) can rotate credentials.
+	if excluded := homeExcludedAuthIDsFromMetadata(opts.Metadata); len(excluded) > 0 {
+		if tried == nil {
+			tried = make(map[string]struct{}, len(excluded))
+		}
+		for _, authID := range excluded {
+			tried[authID] = struct{}{}
+		}
+	}
+
 	opts.EnsureMetadata()
 	opts.Metadata[cliproxyexecutor.SessionAffinityProviderMetadataKey] = provider
 	opts.Metadata[cliproxyexecutor.SessionAffinityModelMetadataKey] = selectionArgForSelector(m.selector, model)

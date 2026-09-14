@@ -3,13 +3,17 @@ package live
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"net/http"
 	"net/url"
 	"strings"
+	"sync"
+	"time"
 
 	"github.com/gin-gonic/gin"
 	"github.com/gorilla/websocket"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/clienterror"
+	"github.com/router-for-me/CLIProxyAPI/v7/internal/config"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/logging"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/runtime/executor/helps"
 	"github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/auth"
@@ -56,46 +60,23 @@ func (h *Handler) HandleDirectWebsocket(c *gin.Context) {
 	ctx := context.WithValue(c.Request.Context(), "gin", c)
 	ctx = coreexecutor.WithDownstreamWebsocket(ctx)
 	selectionOpts := coreexecutor.Options{Headers: liveSelectionHeaders(c)}
-	selection, selected, errSelect := h.selectOAuth(ctx, selectionModel, selectionOpts)
-	if errSelect != nil {
-		writeSelectionError(c, errSelect)
-		return
-	}
-	if selected == nil {
-		if selection != nil {
-			selection.End("missing_auth")
-		}
-		writeRealtimeError(c, http.StatusServiceUnavailable, "Codex auth unavailable", "server_error", "codex_auth_unavailable")
-		return
-	}
-	if selection != nil {
-		attemptCtx, releaseAttempt, errAttempt := selection.AttemptContext(ctx)
-		if errAttempt != nil {
-			selection.End("attempt_bind_failed")
-			writeRealtimeError(c, http.StatusServiceUnavailable, errAttempt.Error(), "server_error", "realtime_upstream_unavailable")
-			return
-		}
-		ctx = attemptCtx
-		defer releaseAttempt()
-		selection.Retain()
-		defer selection.End("session_closed")
-	}
-	logging.SetGinCPATraceID(c, selected.EnsureIndex())
-
 	upstreamURL := h.directRealtimeURL(requestedModel)
-	dialUpstream := func(current *auth.Auth) (*websocket.Conn, *http.Response, error) {
-		request, errRequest := http.NewRequestWithContext(ctx, http.MethodGet, websocketHTTPURL(upstreamURL), nil)
+	helpConfig := h.currentConfig()
+	maxCredentials := directWebsocketMaxCredentials(helpConfig)
+	tried := make(map[string]struct{})
+
+	dialUpstream := func(attemptCtx context.Context, current *auth.Auth) (*websocket.Conn, *http.Response, error) {
+		request, errRequest := http.NewRequestWithContext(attemptCtx, http.MethodGet, websocketHTTPURL(upstreamURL), nil)
 		if errRequest != nil {
 			return nil, nil, errRequest
 		}
 		request.Header = directRealtimeHeaders(c.Request.Header)
 		setAccountHeader(request.Header, current)
-		if errPrepare := h.authManager.PrepareHttpRequest(ctx, current, request); errPrepare != nil {
+		if errPrepare := h.authManager.PrepareHttpRequest(attemptCtx, current, request); errPrepare != nil {
 			return nil, nil, errPrepare
 		}
 		authType, authValue := current.AccountInfo()
-		helpersConfig := h.currentConfig()
-		helps.RecordAPIWebsocketRequest(ctx, helpersConfig, helps.UpstreamRequestLog{
+		helps.RecordAPIWebsocketRequest(attemptCtx, helpConfig, helps.UpstreamRequestLog{
 			URL:       upstreamURL,
 			Method:    "WEBSOCKET",
 			Headers:   headersForLogging(request.Header),
@@ -105,69 +86,116 @@ func (h *Handler) HandleDirectWebsocket(c *gin.Context) {
 			AuthType:  authType,
 			AuthValue: authValue,
 		})
-		dialer := newProxyAwareSidebandDialer(helpersConfig, current)
+		dialer := newProxyAwareSidebandDialer(helpConfig, current)
 		dialer.Subprotocols = websocket.Subprotocols(c.Request)
-		return dialer.DialContext(ctx, upstreamURL, request.Header)
+		return dialer.DialContext(attemptCtx, upstreamURL, request.Header)
 	}
 
-	upstream, handshakeResponse, errDial := dialUpstream(selected)
-	if errDial != nil {
-		status := clienterror.HTTPStatusFromErrorOr(errDial, http.StatusBadGateway)
-		helpConfig := h.currentConfig()
-		var responseBody []byte
-		if handshakeResponse != nil && handshakeResponse.StatusCode > 0 {
-			status = handshakeResponse.StatusCode
-			copyRealtimeHandshakeHeaders(c.Writer.Header(), handshakeResponse.Header)
-			helps.RecordAPIWebsocketHandshake(ctx, helpConfig, handshakeResponse.StatusCode, callResponseHeaders(handshakeResponse.Header))
-			if handshakeResponse.Body != nil {
-				var errRead error
-				responseBody, errRead = readLimitedBody(handshakeResponse.Body)
-				if errRead != nil {
-					log.Errorf("codex realtime: read rejected handshake body error: %v", errRead)
-				}
-				helps.AppendAPIWebsocketResponse(ctx, helpConfig, responseBody)
-			}
+	var selection *auth.HomeDispatchSelection
+	var selected *auth.Auth
+	var upstream *websocket.Conn
+	var releaseAttempt func()
+	var lastFailure *liveHandshakeFailure
+	for {
+		if maxCredentials > 0 && len(tried) >= maxCredentials {
+			break
 		}
-		closeHandshakeBody(handshakeResponse, "direct websocket rejected")
-		if selection != nil && status == http.StatusUnauthorized {
-			diagnosticBody := responseBody
+		attemptOpts := excludedAuthIDsOption(selectionOpts, tried)
+		var errSelect error
+		selection, selected, errSelect = h.selectOAuth(ctx, selectionModel, attemptOpts)
+		if errSelect != nil {
+			if lastFailure != nil {
+				lastFailure.write(c)
+				return
+			}
+			writeSelectionError(c, errSelect)
+			return
+		}
+		if selected == nil {
+			if selection != nil {
+				selection.End("missing_auth")
+			}
+			if lastFailure != nil {
+				lastFailure.write(c)
+				return
+			}
+			writeRealtimeError(c, http.StatusServiceUnavailable, "Codex auth unavailable", "server_error", "codex_auth_unavailable")
+			return
+		}
+		if _, alreadyTried := tried[selected.ID]; alreadyTried {
+			// A selector that ignores excluded_auth_ids must not loop forever on
+			// the same credential.
+			if selection != nil {
+				selection.End("repeated_excluded_auth")
+			}
+			break
+		}
+
+		attemptCtx := ctx
+		releaseAttempt = func() {}
+		if selection != nil {
+			boundCtx, release, errAttempt := selection.AttemptContext(ctx)
+			if errAttempt != nil {
+				selection.End("attempt_bind_failed")
+				if lastFailure != nil {
+					lastFailure.write(c)
+					return
+				}
+				writeRealtimeError(c, http.StatusServiceUnavailable, errAttempt.Error(), "server_error", "realtime_upstream_unavailable")
+				return
+			}
+			attemptCtx = boundCtx
+			releaseAttempt = release
+		}
+		logging.SetGinCPATraceID(c, selected.EnsureIndex())
+
+		conn, handshakeResponse, errDial := dialUpstream(attemptCtx, selected)
+		if errDial == nil {
+			closeHandshakeBody(handshakeResponse, "direct websocket handshake")
+			upstream = conn
+			break
+		}
+		failure := newLiveHandshakeFailure(attemptCtx, helpConfig, handshakeResponse, errDial)
+		if selection != nil && failure.status == http.StatusUnauthorized {
+			diagnosticBody := failure.body
 			if len(diagnosticBody) == 0 {
 				diagnosticBody = []byte(errDial.Error())
 			}
-			h.authManager.ReportHomeUnauthorized(ctx, selected, "codex", selectionModel, diagnosticBody)
-			log.WithField("status", status).Warnf("codex realtime websocket upstream handshake failed: %s", logging.SafeDiagnosticForLog(string(diagnosticBody)))
+			h.authManager.ReportHomeUnauthorized(attemptCtx, selected, "codex", selectionModel, diagnosticBody)
 		}
-		helps.RecordAPIWebsocketError(ctx, helpConfig, "dial", errDial)
-		if handshakeResponse != nil && handshakeResponse.StatusCode == http.StatusUnauthorized {
-			if contentType := handshakeResponse.Header.Get("Content-Type"); contentType != "" {
-				c.Header("Content-Type", contentType)
+		log.WithField("status", failure.status).Warnf("codex realtime websocket upstream handshake failed: %s", logging.SafeDiagnosticForLog(string(failure.body)))
+		helps.RecordAPIWebsocketError(attemptCtx, helpConfig, "dial", errDial)
+
+		tried[selected.ID] = struct{}{}
+		lastFailure = failure
+		if failure.credentialScoped && (maxCredentials == 0 || len(tried) < maxCredentials) {
+			h.markHandshakeCredentialFailure(attemptCtx, selected, selectionModel, attemptOpts, failure)
+			releaseAttempt()
+			if selection != nil {
+				selection.End("handshake_credential_failed")
 			}
-			c.Status(handshakeResponse.StatusCode)
-			if len(responseBody) > 0 {
-				if _, errWrite := c.Writer.Write(responseBody); errWrite != nil {
-					log.WithError(errWrite).Warn("codex realtime: write rejected handshake body failed")
-				}
-			}
-			return
+			continue
 		}
-		helpDetails := "Codex Realtime WebSocket upstream unavailable"
-		helpType := "api_error"
-		if status == http.StatusNotFound || status == http.StatusNotImplemented {
-			helpDetails = "Direct Realtime WebSocket is not supported by the Codex OAuth upstream"
-			helpType = "not_supported_error"
-			status = http.StatusNotImplemented
+		releaseAttempt()
+		if selection != nil {
+			selection.End("handshake_failed")
 		}
-		helpCode := "realtime_websocket_upstream_unavailable"
-		if helpType == "not_supported_error" {
-			helpCode = "realtime_capability_not_supported"
-		} else if status == http.StatusUnauthorized {
-			helpType = "authentication_error"
-			helpCode = "realtime_upstream_unauthorized"
-		}
-		writeRealtimeError(c, status, helpDetails, helpType, helpCode)
+		failure.write(c)
 		return
 	}
-	closeHandshakeBody(handshakeResponse, "direct websocket handshake")
+	if upstream == nil {
+		if lastFailure != nil {
+			lastFailure.write(c)
+			return
+		}
+		writeRealtimeError(c, http.StatusServiceUnavailable, "Codex auth unavailable", "server_error", "codex_auth_unavailable")
+		return
+	}
+	if selection != nil {
+		selection.Retain()
+		defer releaseAttempt()
+		defer selection.End("session_closed")
+	}
 	closeUpstream := websocketCloseFunc("upstream", upstream)
 	defer func() { _ = closeUpstream() }()
 	if len(tokenSession) > 0 {
@@ -217,9 +245,171 @@ func (h *Handler) HandleDirectWebsocket(c *gin.Context) {
 		}
 	}
 
-	if errRelay := relayWebsockets(downstream, upstream); errRelay != nil && !isNormalWebsocketClose(errRelay) {
+	inspect := h.liveQuotaFrameInspector(ctx, selected, selectionModel, selectionOpts)
+	if errRelay := relayWebsocketsQuotaGuarded(downstream, upstream, inspect); errRelay != nil && !isNormalWebsocketClose(errRelay) && !errors.Is(errRelay, errLiveCredentialExhausted) {
 		helps.RecordAPIWebsocketError(ctx, h.currentConfig(), "relay", errRelay)
 		log.WithError(errRelay).Debug("codex realtime direct websocket relay closed")
+	}
+}
+
+// liveHandshakeFailure captures a rejected upstream handshake so the terminal
+// response can be replayed after credential failover is exhausted.
+type liveHandshakeFailure struct {
+	status           int
+	credentialScoped bool
+	headers          http.Header
+	body             []byte
+	contentType      string
+	retryAfter       *time.Duration
+}
+
+func newLiveHandshakeFailure(ctx context.Context, cfg *config.Config, response *http.Response, errDial error) *liveHandshakeFailure {
+	failure := &liveHandshakeFailure{
+		status: clienterror.HTTPStatusFromErrorOr(errDial, http.StatusBadGateway),
+	}
+	if response != nil {
+		if response.StatusCode > 0 {
+			failure.status = response.StatusCode
+		}
+		failure.headers = response.Header.Clone()
+		failure.contentType = response.Header.Get("Content-Type")
+		helps.RecordAPIWebsocketHandshake(ctx, cfg, response.StatusCode, callResponseHeaders(response.Header))
+		if response.Body != nil {
+			var errRead error
+			failure.body, errRead = readLimitedBody(response.Body)
+			if errRead != nil {
+				log.Errorf("codex realtime: read rejected handshake body error: %v", errRead)
+			}
+			helps.AppendAPIWebsocketResponse(ctx, cfg, failure.body)
+		}
+	}
+	closeHandshakeBody(response, "direct websocket rejected")
+	failure.credentialScoped = isCredentialHandshakeFailure(failure.status, failure.body)
+	failure.retryAfter = handshakeRetryAfter(failure.headers, failure.body)
+	return failure
+}
+
+// resultCredentialScope reports whether a handshake rejection marks the whole
+// credential unusable. 401 and 403 mean revoked/unauthorized credentials, so
+// every model route must stop selecting them; 402, 429 and usage-limit bodies
+// keep their existing model-scoped or credential-scoped treatment.
+func (f *liveHandshakeFailure) resultCredentialScope() bool {
+	if f == nil {
+		return false
+	}
+	switch f.status {
+	case http.StatusUnauthorized, http.StatusForbidden:
+		return true
+	}
+	return isLiveUsageLimitBody(f.body) || f.status == http.StatusTooManyRequests || f.status == http.StatusPaymentRequired
+}
+
+// write reproduces the terminal response the upstream rejection produced,
+// preserving Retry-After and request ID headers from the failed handshake.
+func (f *liveHandshakeFailure) write(c *gin.Context) {
+	copyRealtimeHandshakeHeaders(c.Writer.Header(), f.headers)
+	if f.status == http.StatusUnauthorized && len(f.headers) > 0 {
+		if f.contentType != "" {
+			c.Header("Content-Type", f.contentType)
+		}
+		c.Status(f.status)
+		if len(f.body) > 0 {
+			if _, errWrite := c.Writer.Write(f.body); errWrite != nil {
+				log.WithError(errWrite).Warn("codex realtime: write rejected handshake body failed")
+			}
+		}
+		return
+	}
+	status := f.status
+	helpDetails := "Codex Realtime WebSocket upstream unavailable"
+	helpType := "api_error"
+	if status == http.StatusNotFound || status == http.StatusNotImplemented {
+		helpDetails = "Direct Realtime WebSocket is not supported by the Codex OAuth upstream"
+		helpType = "not_supported_error"
+		status = http.StatusNotImplemented
+	}
+	helpCode := "realtime_websocket_upstream_unavailable"
+	if helpType == "not_supported_error" {
+		helpCode = "realtime_capability_not_supported"
+	} else if status == http.StatusUnauthorized {
+		helpType = "authentication_error"
+		helpCode = "realtime_upstream_unauthorized"
+	} else if status == http.StatusTooManyRequests {
+		helpType = "rate_limit_error"
+		helpCode = "realtime_upstream_rate_limited"
+	}
+	writeRealtimeError(c, status, helpDetails, helpType, helpCode)
+}
+
+// markHandshakeCredentialFailure feeds a credential-scoped handshake rejection
+// into the shared result/cooldown path so the failed credential cools for other
+// requests too. Home-dispatched credentials receive the same bookkeeping; the
+// manager observes the result even when the credential is not locally stored.
+func (h *Handler) markHandshakeCredentialFailure(ctx context.Context, selected *auth.Auth, model string, opts coreexecutor.Options, failure *liveHandshakeFailure) {
+	if h == nil || h.authManager == nil || selected == nil || failure == nil {
+		return
+	}
+	message := strings.TrimSpace(string(failure.body))
+	if len(message) > 512 {
+		message = message[:512]
+	}
+	if message == "" {
+		message = http.StatusText(failure.status)
+	}
+	result := auth.Result{
+		AuthID:   selected.ID,
+		Provider: "codex",
+		Model:    model,
+		Success:  false,
+		Options:  liveResultOptions(opts, model),
+		Error: &auth.Error{
+			Code:       "upstream_handshake_failed",
+			Message:    message,
+			HTTPStatus: failure.status,
+			Retryable:  true,
+		},
+		RetryAfter:      failure.retryAfter,
+		CredentialScope: failure.resultCredentialScope(),
+	}
+	// MarkResult invokes the same OnResult hook as reportHomeResult, so Home
+	// dispatch results are already observed; no separate Home report is needed.
+	h.authManager.MarkResult(ctx, result)
+}
+
+// liveQuotaFrameInspector returns the guard applied to upstream->downstream
+// frames. On a credential-exhaustion event it records the cooldown, rewrites
+// the frame to a machine-readable error, and asks the relay to close both
+// sides with the private close code.
+func (h *Handler) liveQuotaFrameInspector(ctx context.Context, selected *auth.Auth, model string, opts coreexecutor.Options) func(payload []byte) ([]byte, bool) {
+	var once sync.Once
+	return func(payload []byte) ([]byte, bool) {
+		code, retryAfter, credentialScoped, matched := classifyLiveQuotaErrorFrame(payload)
+		if !matched {
+			return nil, false
+		}
+		once.Do(func() {
+			if h != nil && h.authManager != nil && selected != nil {
+				// MarkResult invokes the same OnResult hook as reportHomeResult, so
+				// Home dispatch results are already observed.
+				h.authManager.MarkResult(ctx, auth.Result{
+					AuthID:          selected.ID,
+					Provider:        "codex",
+					Model:           model,
+					Success:         false,
+					Options:         liveResultOptions(opts, model),
+					RetryAfter:      retryAfter,
+					CredentialScope: credentialScoped,
+					Error: &auth.Error{
+						Code:       liveCredentialExhaustedCode,
+						Message:    "codex realtime credential exhausted: " + code,
+						HTTPStatus: http.StatusTooManyRequests,
+						Retryable:  true,
+					},
+				})
+			}
+			log.WithField("upstream_code", code).Warn("codex realtime upstream reported credential quota exhaustion")
+		})
+		return credentialExhaustedFrame(code), true
 	}
 }
 
