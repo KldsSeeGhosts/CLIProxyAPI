@@ -1,0 +1,1697 @@
+{
+  "schema_version": 1,
+  "models": [
+    {
+      "id": "claude-opus-4-6-thinking",
+      "name": "Claude Opus 4.6 (CPA \u2192 Antigravity)",
+      "context_window": 200000,
+      "max_output_tokens": 128000,
+      "input_modalities": [
+        "text",
+        "image"
+      ],
+      "reasoning": true,
+      "cost": {
+        "input": 5,
+        "output": 25,
+        "cacheRead": 0.5,
+        "cacheWrite": 6.25
+      },
+      "pi": {
+        "api": "anthropic-messages",
+        "thinkingLevelMap": {
+          "off": null,
+          "minimal": null
+        }
+      },
+      "provenance": "imported from existing Pi provider; not independently reverified"
+    },
+    {
+      "id": "claude-sonnet-4-6-thinking",
+      "name": "Claude Sonnet 4.6 (CPA \u2192 Antigravity)",
+      "context_window": 200000,
+      "max_output_tokens": 64000,
+      "input_modalities": [
+        "text",
+        "image"
+      ],
+      "reasoning": true,
+      "cost": {
+        "input": 3,
+        "output": 15,
+        "cacheRead": 0.3,
+        "cacheWrite": 3.75
+      },
+      "pi": {
+        "api": "anthropic-messages",
+        "thinkingLevelMap": {
+          "off": null,
+          "minimal": null
+        }
+      },
+      "provenance": "imported from existing Pi provider; not independently reverified"
+    },
+    {
+      "id": "gpt-5.6-sol",
+      "name": "GPT 5.6 Sol (CPA \u2192 Codex)",
+      "context_window": 272000,
+      "max_output_tokens": 128000,
+      "input_modalities": [
+        "text",
+        "image"
+      ],
+      "reasoning": true,
+      "cost": {
+        "input": 5,
+        "output": 30,
+        "cacheRead": 0.5,
+        "cacheWrite": 6.25,
+        "tiers": [
+          {
+            "inputTokensAbove": 272000,
+            "input": 10,
+            "output": 45,
+            "cacheRead": 1,
+            "cacheWrite": 12.5
+          }
+        ]
+      },
+      "pi": {
+        "api": "openai-responses",
+        "headers": {
+          "Originator": "pi",
+          "Version": "0.144.1"
+        },
+        "compat": {
+          "supportsOpenAIGrammarTools": true
+        },
+        "thinkingLevelMap": {
+          "off": null,
+          "minimal": null,
+          "xhigh": "xhigh",
+          "max": "max"
+        }
+      },
+      "provenance": "imported from existing Pi provider; not independently reverified"
+    },
+    {
+      "id": "gpt-5.6-terra",
+      "name": "GPT 5.6 Terra (CPA \u2192 Codex)",
+      "context_window": 272000,
+      "max_output_tokens": 128000,
+      "input_modalities": [
+        "text",
+        "image"
+      ],
+      "reasoning": true,
+      "cost": {
+        "input": 2.5,
+        "output": 15,
+        "cacheRead": 0.25,
+        "cacheWrite": 3.125,
+        "tiers": [
+          {
+            "inputTokensAbove": 272000,
+            "input": 5,
+            "output": 22.5,
+            "cacheRead": 0.5,
+            "cacheWrite": 6.25
+          }
+        ]
+      },
+      "pi": {
+        "api": "openai-responses",
+        "headers": {
+          "Originator": "pi",
+          "Version": "0.144.1"
+        },
+        "compat": {
+          "supportsOpenAIGrammarTools": true
+        },
+        "thinkingLevelMap": {
+          "off": null,
+          "minimal": null,
+          "xhigh": "xhigh",
+          "max": "max"
+        }
+      },
+      "provenance": "imported from existing Pi provider; not independently reverified"
+    },
+    {
+      "id": "gpt-5.6-luna",
+      "name": "GPT 5.6 Luna (CPA \u2192 Codex)",
+      "context_window": 272000,
+      "max_output_tokens": 128000,
+      "input_modalities": [
+        "text",
+        "image"
+      ],
+      "reasoning": true,
+      "cost": {
+        "input": 1,
+        "output": 6,
+        "cacheRead": 0.1,
+        "cacheWrite": 1.25,
+        "tiers": [
+          {
+            "inputTokensAbove": 272000,
+            "input": 2,
+            "output": 9,
+            "cacheRead": 0.2,
+            "cacheWrite": 2.5
+          }
+        ]
+      },
+      "pi": {
+        "api": "openai-responses",
+        "headers": {
+          "Originator": "pi",
+          "Version": "0.144.1"
+        },
+        "compat": {
+          "supportsOpenAIGrammarTools": true
+        },
+        "thinkingLevelMap": {
+          "off": null,
+          "minimal": null,
+          "xhigh": "xhigh",
+          "max": "max"
+        }
+      },
+      "provenance": "imported from existing Pi provider; not independently reverified"
+    },
+    {
+      "id": "gpt-6-astra",
+      "name": "GPT 6 Astra (CPA \u2192 Codex)",
+      "context_window": 272000,
+      "max_output_tokens": 128000,
+      "input_modalities": [
+        "text",
+        "image"
+      ],
+      "reasoning": true,
+      "cost": {
+        "input": 5,
+        "output": 30,
+        "cacheRead": 0.5,
+        "cacheWrite": 6.25,
+        "tiers": [
+          {
+            "inputTokensAbove": 272000,
+            "input": 10,
+            "output": 45,
+            "cacheRead": 1,
+            "cacheWrite": 12.5
+          }
+        ]
+      },
+      "pi": {
+        "api": "openai-responses",
+        "headers": {
+          "Originator": "pi",
+          "Version": "0.153.2"
+        },
+        "compat": {
+          "supportsOpenAIGrammarTools": true
+        },
+        "thinkingLevelMap": {
+          "off": null,
+          "minimal": null,
+          "xhigh": "xhigh",
+          "max": "max"
+        }
+      },
+      "provenance": "imported from existing Pi provider; not independently reverified"
+    },
+    {
+      "id": "gpt-5.5",
+      "name": "GPT 5.5 (CPA \u2192 Codex)",
+      "context_window": 272000,
+      "max_output_tokens": 128000,
+      "input_modalities": [
+        "text",
+        "image"
+      ],
+      "reasoning": true,
+      "cost": {
+        "input": 5,
+        "output": 30,
+        "cacheRead": 0.5,
+        "cacheWrite": 6.25
+      },
+      "pi": {
+        "api": "openai-responses",
+        "headers": {
+          "Originator": "pi",
+          "Version": "0.144.1"
+        },
+        "thinkingLevelMap": {
+          "off": null,
+          "minimal": null,
+          "xhigh": "xhigh"
+        }
+      },
+      "provenance": "imported from existing Pi provider; not independently reverified"
+    },
+    {
+      "id": "gpt-5.4",
+      "name": "GPT 5.4 (CPA \u2192 Codex)",
+      "context_window": 1050000,
+      "max_output_tokens": 128000,
+      "input_modalities": [
+        "text",
+        "image"
+      ],
+      "reasoning": true,
+      "cost": {
+        "input": 2.5,
+        "output": 15,
+        "cacheRead": 0.25,
+        "cacheWrite": 3.125
+      },
+      "pi": {
+        "api": "openai-responses",
+        "headers": {
+          "Originator": "pi",
+          "Version": "0.144.1"
+        },
+        "thinkingLevelMap": {
+          "off": null,
+          "minimal": null,
+          "xhigh": "xhigh"
+        }
+      },
+      "provenance": "imported from existing Pi provider; not independently reverified"
+    },
+    {
+      "id": "gpt-5.4-mini",
+      "name": "GPT 5.4 Mini (CPA \u2192 Codex)",
+      "context_window": 400000,
+      "max_output_tokens": 128000,
+      "input_modalities": [
+        "text",
+        "image"
+      ],
+      "reasoning": true,
+      "cost": {
+        "input": 0.75,
+        "output": 4.5,
+        "cacheRead": 0.075,
+        "cacheWrite": 0.9375
+      },
+      "pi": {
+        "api": "openai-responses",
+        "headers": {
+          "Originator": "pi",
+          "Version": "0.144.1"
+        },
+        "thinkingLevelMap": {
+          "off": null,
+          "minimal": null,
+          "xhigh": "xhigh"
+        }
+      },
+      "provenance": "imported from existing Pi provider; not independently reverified"
+    },
+    {
+      "id": "gemini-3.8-flash",
+      "name": "Gemini 3.8 Flash (CPA \u2192 Antigravity Responses)",
+      "context_window": 1048576,
+      "max_output_tokens": 65535,
+      "input_modalities": [
+        "text",
+        "image"
+      ],
+      "reasoning": true,
+      "cost": {
+        "input": 0.75,
+        "output": 3.75,
+        "cacheRead": 0.075,
+        "cacheWrite": 0.075
+      },
+      "pi": {
+        "api": "openai-responses",
+        "headers": {
+          "Originator": "pi"
+        },
+        "thinkingLevelMap": {
+          "off": null,
+          "minimal": null,
+          "low": "low",
+          "medium": "medium",
+          "high": "high",
+          "xhigh": null,
+          "max": null
+        }
+      },
+      "provenance": "imported from existing Pi provider; not independently reverified"
+    },
+    {
+      "id": "gemini-3.1-flash-lite",
+      "name": "Gemini 3.1 Flash Lite (CPA \u2192 Antigravity Responses)",
+      "context_window": 1048576,
+      "max_output_tokens": 65535,
+      "input_modalities": [
+        "text",
+        "image"
+      ],
+      "reasoning": true,
+      "cost": {
+        "input": 0.075,
+        "output": 0.3,
+        "cacheRead": 0.01875,
+        "cacheWrite": 0.01875
+      },
+      "pi": {
+        "api": "openai-responses",
+        "headers": {
+          "Originator": "pi"
+        },
+        "thinkingLevelMap": {
+          "off": null,
+          "minimal": null,
+          "low": "low",
+          "medium": "medium",
+          "high": "high",
+          "xhigh": null,
+          "max": null
+        }
+      },
+      "provenance": "imported from existing Pi provider; not independently reverified"
+    },
+    {
+      "id": "kimi-k3",
+      "name": "Kimi K3 (CPA \u2192 Moonshot)",
+      "context_window": 1048576,
+      "max_output_tokens": 65536,
+      "input_modalities": [
+        "text",
+        "image"
+      ],
+      "reasoning": true,
+      "cost": {
+        "input": 3,
+        "output": 15,
+        "cacheRead": 0.3,
+        "cacheWrite": 0
+      },
+      "pi": {
+        "api": "openai-completions",
+        "headers": {
+          "Originator": "pi"
+        },
+        "compat": {
+          "supportsDeveloperRole": false
+        },
+        "thinkingLevelMap": {
+          "off": null,
+          "minimal": null,
+          "low": "low",
+          "medium": null,
+          "high": "high",
+          "max": "max"
+        }
+      },
+      "provenance": "imported from existing Pi provider; not independently reverified"
+    },
+    {
+      "id": "kimi-k3-256k",
+      "name": "Kimi K3-256K (CPA \u2192 Moonshot)",
+      "context_window": 256000,
+      "max_output_tokens": 131072,
+      "input_modalities": [
+        "text",
+        "image"
+      ],
+      "reasoning": true,
+      "cost": {
+        "input": 3,
+        "output": 15,
+        "cacheRead": 0.3,
+        "cacheWrite": 0
+      },
+      "pi": {
+        "api": "openai-completions",
+        "headers": {
+          "Originator": "pi"
+        },
+        "compat": {
+          "supportsDeveloperRole": false
+        },
+        "thinkingLevelMap": {
+          "off": null,
+          "minimal": null,
+          "low": "low",
+          "medium": null,
+          "high": "high",
+          "max": "max"
+        }
+      },
+      "provenance": "imported from existing Pi provider; not independently reverified"
+    },
+    {
+      "id": "gpt-oss-120b-medium",
+      "name": "GPT-OSS 120B Medium (CPA \u2192 Antigravity)",
+      "context_window": 131072,
+      "max_output_tokens": 32768,
+      "input_modalities": [
+        "text"
+      ],
+      "reasoning": false,
+      "cost": {
+        "input": 0.036,
+        "output": 0.18,
+        "cacheRead": 0,
+        "cacheWrite": 0
+      },
+      "pi": {
+        "api": "openai-completions",
+        "headers": {
+          "Originator": "pi"
+        }
+      },
+      "provenance": "imported from existing Pi provider; not independently reverified"
+    },
+    {
+      "id": "opencode-go/deepseek-v4.1-flash",
+      "name": "DeepSeek V4.1 Flash (CPA \u2192 OpenCode Go)",
+      "context_window": 1000000,
+      "max_output_tokens": 393216,
+      "input_modalities": [
+        "text",
+        "image"
+      ],
+      "reasoning": true,
+      "cost": {
+        "input": 0.15,
+        "output": 0.6,
+        "cacheRead": 0.003,
+        "cacheWrite": 0
+      },
+      "pi": {
+        "api": "openai-completions",
+        "headers": {
+          "Originator": "pi"
+        },
+        "thinkingLevelMap": {
+          "off": null,
+          "minimal": null,
+          "low": "low",
+          "medium": null,
+          "high": "high",
+          "xhigh": null,
+          "max": "max"
+        }
+      },
+      "provenance": "DeepSeek official docs and CPA image probe, 2026-09-22; 1000000 is conservative cap for documented 1M, not measured route maximum"
+    },
+    {
+      "id": "opencode-go/deepseek-flash",
+      "name": "DeepSeek V4.1 Flash Alias (CPA \u2192 OpenCode Go)",
+      "context_window": 1000000,
+      "max_output_tokens": 393216,
+      "input_modalities": [
+        "text",
+        "image"
+      ],
+      "reasoning": true,
+      "cost": {
+        "input": 0.15,
+        "output": 0.6,
+        "cacheRead": 0.003,
+        "cacheWrite": 0
+      },
+      "pi": {
+        "api": "openai-completions",
+        "headers": {
+          "Originator": "pi"
+        },
+        "thinkingLevelMap": {
+          "off": null,
+          "minimal": null,
+          "low": "low",
+          "medium": null,
+          "high": "high",
+          "xhigh": null,
+          "max": "max"
+        }
+      },
+      "provenance": "DeepSeek official docs and CPA image probe, 2026-09-22; 1000000 is conservative cap for documented 1M, not measured route maximum"
+    },
+    {
+      "id": "opencode-go/deepseek-v4-flash",
+      "name": "DeepSeek V4 Flash (CPA \u2192 OpenCode Go)",
+      "context_window": 1048576,
+      "max_output_tokens": 384000,
+      "input_modalities": [
+        "text"
+      ],
+      "reasoning": true,
+      "cost": {
+        "input": 0.14,
+        "output": 0.28,
+        "cacheRead": 0.0028,
+        "cacheWrite": 0
+      },
+      "pi": {
+        "api": "openai-completions",
+        "headers": {
+          "Originator": "pi"
+        },
+        "thinkingLevelMap": {
+          "off": null,
+          "minimal": null,
+          "low": "low",
+          "medium": null,
+          "high": "high",
+          "xhigh": null,
+          "max": "max"
+        }
+      },
+      "provenance": "imported from existing Pi provider; not independently reverified"
+    },
+    {
+      "id": "opencode-go/deepseek-v4-pro",
+      "name": "DeepSeek V4 Pro (CPA \u2192 OpenCode Go)",
+      "context_window": 1048576,
+      "max_output_tokens": 384000,
+      "input_modalities": [
+        "text"
+      ],
+      "reasoning": true,
+      "cost": {
+        "input": 0.435,
+        "output": 0.87,
+        "cacheRead": 0.003625,
+        "cacheWrite": 0
+      },
+      "pi": {
+        "api": "openai-completions",
+        "headers": {
+          "Originator": "pi"
+        },
+        "thinkingLevelMap": {
+          "off": null,
+          "minimal": null,
+          "low": "low",
+          "medium": null,
+          "high": "high",
+          "xhigh": null,
+          "max": "max"
+        }
+      },
+      "provenance": "imported from existing Pi provider; not independently reverified"
+    },
+    {
+      "id": "opencode-go/muse-spark-1.2",
+      "name": "Muse Spark 1.2 (CPA \u2192 OpenCode Go)",
+      "context_window": 1048576,
+      "max_output_tokens": 131072,
+      "input_modalities": [
+        "text",
+        "image"
+      ],
+      "reasoning": true,
+      "cost": {
+        "input": 0.1,
+        "output": 0.2,
+        "cacheRead": 0.002,
+        "cacheWrite": 0
+      },
+      "pi": {
+        "api": "openai-responses",
+        "headers": {
+          "Originator": "pi"
+        },
+        "thinkingLevelMap": {
+          "off": null,
+          "minimal": null,
+          "low": "low",
+          "medium": "medium",
+          "high": "high",
+          "xhigh": "xhigh",
+          "max": null
+        }
+      },
+      "provenance": "imported from existing Pi provider; not independently reverified"
+    },
+    {
+      "id": "opencode-go/muse-spark-1.3-contributor",
+      "name": "Muse Spark 1.3 Contributor (CPA \u2192 OpenCode Go)",
+      "context_window": 1048576,
+      "max_output_tokens": 131072,
+      "input_modalities": [
+        "text",
+        "image"
+      ],
+      "reasoning": true,
+      "cost": {
+        "input": 0.1,
+        "output": 0.2,
+        "cacheRead": 0.002,
+        "cacheWrite": 0
+      },
+      "pi": {
+        "api": "openai-responses",
+        "headers": {
+          "Originator": "pi"
+        },
+        "thinkingLevelMap": {
+          "off": null,
+          "minimal": null,
+          "low": "low",
+          "medium": "medium",
+          "high": "high",
+          "xhigh": "xhigh",
+          "max": null
+        }
+      },
+      "provenance": "imported from existing Pi provider; not independently reverified"
+    },
+    {
+      "id": "opencode-go/glm-5.3",
+      "name": "GLM-5.3 (CPA \u2192 OpenCode Go)",
+      "context_window": 1048576,
+      "max_output_tokens": 131000,
+      "input_modalities": [
+        "text"
+      ],
+      "reasoning": true,
+      "cost": {
+        "input": 0.42,
+        "output": 1.32,
+        "cacheRead": 0.078,
+        "cacheWrite": 0
+      },
+      "pi": {
+        "api": "openai-completions",
+        "headers": {
+          "Originator": "pi"
+        },
+        "thinkingLevelMap": {
+          "off": null,
+          "minimal": null,
+          "low": "low",
+          "medium": null,
+          "high": "high",
+          "xhigh": null,
+          "max": "max"
+        }
+      },
+      "provenance": "imported from existing Pi provider; not independently reverified"
+    },
+    {
+      "id": "opencode-go/omen-alpha",
+      "name": "Omen Alpha (CPA \u2192 OpenCode Go)",
+      "context_window": 1048576,
+      "max_output_tokens": 131072,
+      "input_modalities": [
+        "text",
+        "image"
+      ],
+      "reasoning": true,
+      "cost": {
+        "input": 0.2,
+        "output": 0.66,
+        "cacheRead": 0.04,
+        "cacheWrite": 0
+      },
+      "pi": {
+        "api": "openai-completions",
+        "headers": {
+          "Originator": "pi"
+        },
+        "thinkingLevelMap": {
+          "off": null,
+          "minimal": "minimal",
+          "low": "low",
+          "medium": "medium",
+          "high": "high",
+          "xhigh": "xhigh",
+          "max": "max"
+        }
+      },
+      "provenance": "imported from existing Pi provider; not independently reverified"
+    },
+    {
+      "id": "opencode-go/glm-5.1",
+      "name": "opencode-go/glm-5.1 (CPA \u2192 opencode-go)",
+      "context_window": 203000,
+      "max_output_tokens": 32000,
+      "input_modalities": [
+        "text"
+      ],
+      "reasoning": true,
+      "cost": {
+        "input": 0.966,
+        "output": 3.036,
+        "cacheRead": 0.1794,
+        "cacheWrite": 0
+      },
+      "pi": {
+        "api": "openai-completions",
+        "headers": {
+          "Originator": "pi"
+        }
+      },
+      "provenance": "imported from existing Pi provider; not independently reverified"
+    },
+    {
+      "id": "opencode-go/glm-5.2",
+      "name": "opencode-go/glm-5.2 (CPA \u2192 opencode-go)",
+      "context_window": 1048576,
+      "max_output_tokens": 131000,
+      "input_modalities": [
+        "text"
+      ],
+      "reasoning": true,
+      "cost": {
+        "input": 0.42,
+        "output": 1.32,
+        "cacheRead": 0.078,
+        "cacheWrite": 0
+      },
+      "pi": {
+        "api": "openai-completions",
+        "headers": {
+          "Originator": "pi"
+        }
+      },
+      "provenance": "imported from existing Pi provider; not independently reverified"
+    },
+    {
+      "id": "opencode-go/kimi-k2.6",
+      "name": "opencode-go/kimi-k2.6 (CPA \u2192 opencode-go)",
+      "context_window": 262000,
+      "max_output_tokens": 65000,
+      "input_modalities": [
+        "text",
+        "image"
+      ],
+      "reasoning": true,
+      "cost": {
+        "input": 0.66,
+        "output": 3.41,
+        "cacheRead": 0.15,
+        "cacheWrite": 0
+      },
+      "pi": {
+        "api": "openai-completions",
+        "headers": {
+          "Originator": "pi"
+        }
+      },
+      "provenance": "imported from existing Pi provider; not independently reverified"
+    },
+    {
+      "id": "opencode-go/kimi-k2.7-code",
+      "name": "opencode-go/kimi-k2.7-code (CPA \u2192 opencode-go)",
+      "context_window": 262000,
+      "max_output_tokens": 262000,
+      "input_modalities": [
+        "text",
+        "image"
+      ],
+      "reasoning": true,
+      "cost": {
+        "input": 0.72,
+        "output": 3.49,
+        "cacheRead": 0.159,
+        "cacheWrite": 0
+      },
+      "pi": {
+        "api": "openai-completions",
+        "headers": {
+          "Originator": "pi"
+        }
+      },
+      "provenance": "imported from existing Pi provider; not independently reverified"
+    },
+    {
+      "id": "opencode-go/mimo-v2.5",
+      "name": "opencode-go/mimo-v2.5 (CPA \u2192 opencode-go)",
+      "context_window": 1048576,
+      "max_output_tokens": 128000,
+      "input_modalities": [
+        "text",
+        "image"
+      ],
+      "reasoning": true,
+      "cost": {
+        "input": 0.105,
+        "output": 0.28,
+        "cacheRead": 0.028,
+        "cacheWrite": 0
+      },
+      "pi": {
+        "api": "openai-completions",
+        "headers": {
+          "Originator": "pi"
+        }
+      },
+      "provenance": "imported from existing Pi provider; not independently reverified"
+    },
+    {
+      "id": "opencode-go/mimo-v2.5-pro",
+      "name": "opencode-go/mimo-v2.5-pro (CPA \u2192 opencode-go)",
+      "context_window": 1048576,
+      "max_output_tokens": 128000,
+      "input_modalities": [
+        "text"
+      ],
+      "reasoning": true,
+      "cost": {
+        "input": 0.435,
+        "output": 0.87,
+        "cacheRead": 0.0036,
+        "cacheWrite": 0
+      },
+      "pi": {
+        "api": "openai-completions",
+        "headers": {
+          "Originator": "pi"
+        }
+      },
+      "provenance": "imported from existing Pi provider; not independently reverified"
+    },
+    {
+      "id": "opencode-go/minimax-m2.7",
+      "name": "opencode-go/minimax-m2.7 (CPA \u2192 opencode-go)",
+      "context_window": 205000,
+      "max_output_tokens": 131000,
+      "input_modalities": [
+        "text"
+      ],
+      "reasoning": true,
+      "cost": {
+        "input": 0.24,
+        "output": 0.96,
+        "cacheRead": 0,
+        "cacheWrite": 0
+      },
+      "pi": {
+        "api": "openai-completions",
+        "headers": {
+          "Originator": "pi"
+        }
+      },
+      "provenance": "imported from existing Pi provider; not independently reverified"
+    },
+    {
+      "id": "opencode-go/qwen3.6-plus",
+      "name": "opencode-go/qwen3.6-plus (CPA \u2192 opencode-go)",
+      "context_window": 1048576,
+      "max_output_tokens": 65000,
+      "input_modalities": [
+        "text",
+        "image"
+      ],
+      "reasoning": true,
+      "cost": {
+        "input": 0.325,
+        "output": 1.95,
+        "cacheRead": 0,
+        "cacheWrite": 0.40625
+      },
+      "pi": {
+        "api": "openai-completions",
+        "headers": {
+          "Originator": "pi"
+        }
+      },
+      "provenance": "imported from existing Pi provider; not independently reverified"
+    },
+    {
+      "id": "devin/glm-5.2",
+      "name": "GLM-5.2 High (CPA \u2192 Devin subscription)",
+      "context_window": 200000,
+      "max_output_tokens": 128000,
+      "input_modalities": [
+        "text"
+      ],
+      "reasoning": true,
+      "cost": {
+        "input": 0.42,
+        "output": 1.32,
+        "cacheRead": 0.078,
+        "cacheWrite": 0
+      },
+      "pi": {
+        "api": "openai-completions",
+        "headers": {
+          "Originator": "pi"
+        },
+        "compat": {
+          "supportsDeveloperRole": false
+        },
+        "thinkingLevelMap": {
+          "off": null,
+          "minimal": null,
+          "low": null,
+          "medium": null,
+          "high": "high",
+          "xhigh": null,
+          "max": null
+        }
+      },
+      "provenance": "imported from existing Pi provider; not independently reverified"
+    },
+    {
+      "id": "devin/swe-2",
+      "name": "SWE-2 (CPA \u2192 Devin subscription)",
+      "context_window": 262000,
+      "max_output_tokens": 128000,
+      "input_modalities": [
+        "text",
+        "image"
+      ],
+      "reasoning": true,
+      "cost": {
+        "input": 0,
+        "output": 0,
+        "cacheRead": 0,
+        "cacheWrite": 0
+      },
+      "pi": {
+        "api": "openai-completions",
+        "headers": {
+          "Originator": "pi"
+        },
+        "compat": {
+          "supportsDeveloperRole": false
+        },
+        "thinkingLevelMap": {
+          "off": null,
+          "minimal": null,
+          "low": null,
+          "medium": "medium",
+          "high": "high",
+          "xhigh": null,
+          "max": "max"
+        }
+      },
+      "provenance": "Devin authenticated catalog and CPA image probe, 2026-09-22"
+    },
+    {
+      "id": "zcode/glm-5.3",
+      "name": "GLM-5.3 (CPA \u2192 ZCode plan)",
+      "context_window": 1000000,
+      "max_output_tokens": 128000,
+      "input_modalities": [
+        "text"
+      ],
+      "reasoning": true,
+      "cost": {
+        "input": 0.42,
+        "output": 1.32,
+        "cacheRead": 0.078,
+        "cacheWrite": 0
+      },
+      "pi": {
+        "api": "openai-completions",
+        "headers": {
+          "Originator": "pi"
+        },
+        "thinkingLevelMap": {
+          "off": null,
+          "minimal": null,
+          "low": "low",
+          "medium": null,
+          "high": "high",
+          "xhigh": null,
+          "max": "max"
+        }
+      },
+      "provenance": "imported from existing Pi provider; not independently reverified"
+    },
+    {
+      "id": "zcode/glm-5.3-flash",
+      "name": "GLM-5.3 Flash (CPA \u2192 ZCode plan, free 11-9)",
+      "context_window": 1000000,
+      "max_output_tokens": 128000,
+      "input_modalities": [
+        "text"
+      ],
+      "reasoning": true,
+      "cost": {
+        "input": 0,
+        "output": 0,
+        "cacheRead": 0,
+        "cacheWrite": 0
+      },
+      "pi": {
+        "api": "openai-completions",
+        "headers": {
+          "Originator": "pi"
+        },
+        "thinkingLevelMap": {
+          "off": null,
+          "minimal": null,
+          "low": "low",
+          "medium": null,
+          "high": "high",
+          "xhigh": null,
+          "max": "max"
+        }
+      },
+      "provenance": "imported from existing Pi provider; not independently reverified"
+    },
+    {
+      "id": "zcode/glm-5.2",
+      "name": "GLM-5.2 (CPA \u2192 ZCode plan)",
+      "context_window": 1000000,
+      "max_output_tokens": 128000,
+      "input_modalities": [
+        "text"
+      ],
+      "reasoning": true,
+      "cost": {
+        "input": 0.42,
+        "output": 1.32,
+        "cacheRead": 0.078,
+        "cacheWrite": 0
+      },
+      "pi": {
+        "api": "openai-completions",
+        "headers": {
+          "Originator": "pi"
+        },
+        "thinkingLevelMap": {
+          "off": null,
+          "minimal": null,
+          "low": "low",
+          "medium": null,
+          "high": "high",
+          "xhigh": null,
+          "max": "max"
+        }
+      },
+      "provenance": "imported from existing Pi provider; not independently reverified"
+    },
+    {
+      "id": "cline/glm-5.3-flash",
+      "name": "GLM 5.3 Flash (CPA \u2192 Cline)",
+      "context_window": 1000000,
+      "max_output_tokens": 128000,
+      "input_modalities": [
+        "text"
+      ],
+      "reasoning": true,
+      "cost": {
+        "input": 1.4,
+        "output": 4.4,
+        "cacheRead": 0.26,
+        "cacheWrite": 0
+      },
+      "pi": {
+        "api": "openai-completions",
+        "headers": {
+          "Originator": "pi"
+        },
+        "compat": {
+          "supportsDeveloperRole": false
+        },
+        "thinkingLevelMap": {
+          "off": null,
+          "minimal": null,
+          "low": "low",
+          "medium": null,
+          "high": "high",
+          "xhigh": null,
+          "max": "max"
+        }
+      },
+      "provenance": "imported from existing Pi provider; not independently reverified"
+    },
+    {
+      "id": "fx/glm-5.2",
+      "name": "GLM-5.2 (CPA \u2192 Fireworks / Vercel Gateway)",
+      "context_window": 1000000,
+      "max_output_tokens": 128000,
+      "input_modalities": [
+        "text"
+      ],
+      "reasoning": true,
+      "cost": {
+        "input": 0.42,
+        "output": 1.32,
+        "cacheRead": 0.078,
+        "cacheWrite": 0
+      },
+      "pi": {
+        "api": "openai-completions",
+        "headers": {
+          "Originator": "pi"
+        },
+        "compat": {
+          "supportsDeveloperRole": false
+        },
+        "thinkingLevelMap": {
+          "off": null,
+          "minimal": "low",
+          "low": "low",
+          "medium": "medium",
+          "high": "high",
+          "xhigh": "max",
+          "max": "max"
+        }
+      },
+      "provenance": "imported from existing Pi provider; not independently reverified"
+    },
+    {
+      "id": "devin/claude-opus-5-devin",
+      "name": "Claude Opus 5 (CPA \u2192 Devin subscription)",
+      "context_window": 1000000,
+      "max_output_tokens": 128000,
+      "input_modalities": [
+        "text",
+        "image"
+      ],
+      "reasoning": true,
+      "cost": {
+        "input": 5,
+        "output": 25,
+        "cacheRead": 0.5,
+        "cacheWrite": 6.25
+      },
+      "pi": {
+        "api": "openai-completions",
+        "headers": {
+          "Originator": "pi"
+        },
+        "thinkingLevelMap": {
+          "off": null,
+          "minimal": null,
+          "low": "low",
+          "medium": "medium",
+          "high": "high",
+          "xhigh": "xhigh",
+          "max": "max"
+        }
+      },
+      "provenance": "imported from existing Pi provider; not independently reverified"
+    },
+    {
+      "id": "devin/claude-sonnet-5-devin",
+      "name": "Claude Sonnet 5 (CPA \u2192 Devin subscription)",
+      "context_window": 1000000,
+      "max_output_tokens": 128000,
+      "input_modalities": [
+        "text",
+        "image"
+      ],
+      "reasoning": true,
+      "cost": {
+        "input": 3,
+        "output": 15,
+        "cacheRead": 0.3,
+        "cacheWrite": 3.75
+      },
+      "pi": {
+        "api": "openai-completions",
+        "headers": {
+          "Originator": "pi"
+        },
+        "thinkingLevelMap": {
+          "off": null,
+          "minimal": null,
+          "low": "low",
+          "medium": "medium",
+          "high": "high",
+          "xhigh": "xhigh",
+          "max": "max"
+        }
+      },
+      "provenance": "imported from existing Pi provider; not independently reverified"
+    },
+    {
+      "id": "opencode-go/minimax-m3",
+      "name": "opencode-go/minimax-m3 (CPA \u2192 opencode-go Anthropic)",
+      "context_window": 512000,
+      "max_output_tokens": 131000,
+      "input_modalities": [
+        "text",
+        "image"
+      ],
+      "reasoning": true,
+      "cost": {
+        "input": 0.3,
+        "output": 1.2,
+        "cacheRead": 0.06,
+        "cacheWrite": 0
+      },
+      "pi": {
+        "api": "anthropic-messages"
+      },
+      "provenance": "imported from existing Pi provider; not independently reverified"
+    },
+    {
+      "id": "opencode-go/qwen3.7-max",
+      "name": "opencode-go/qwen3.7-max (CPA \u2192 opencode-go Anthropic)",
+      "context_window": 1048576,
+      "max_output_tokens": 65000,
+      "input_modalities": [
+        "text"
+      ],
+      "reasoning": true,
+      "cost": {
+        "input": 1.25,
+        "output": 3.75,
+        "cacheRead": 0.25,
+        "cacheWrite": 1.5625
+      },
+      "pi": {
+        "api": "anthropic-messages"
+      },
+      "provenance": "imported from existing Pi provider; not independently reverified"
+    },
+    {
+      "id": "opencode-go/qwen3.7-plus",
+      "name": "opencode-go/qwen3.7-plus (CPA \u2192 opencode-go Anthropic)",
+      "context_window": 1048576,
+      "max_output_tokens": 65000,
+      "input_modalities": [
+        "text",
+        "image"
+      ],
+      "reasoning": true,
+      "cost": {
+        "input": 0.32,
+        "output": 1.28,
+        "cacheRead": 0.064,
+        "cacheWrite": 0.4
+      },
+      "pi": {
+        "api": "anthropic-messages"
+      },
+      "provenance": "imported from existing Pi provider; not independently reverified"
+    },
+    {
+      "id": "dashscope/qwen3.8-max-preview",
+      "name": "dashscope/qwen3.8-max-preview (CPA \u2192 Model Studio Token Plan)",
+      "context_window": 1000000,
+      "max_output_tokens": 131072,
+      "input_modalities": [
+        "text",
+        "image"
+      ],
+      "reasoning": true,
+      "cost": {
+        "input": 1.25,
+        "output": 3.75,
+        "cacheRead": 0.25,
+        "cacheWrite": 1.5625
+      },
+      "pi": {
+        "api": "openai-completions",
+        "compat": {
+          "supportsDeveloperRole": false
+        },
+        "thinkingLevelMap": {
+          "off": null,
+          "minimal": null,
+          "low": "low",
+          "medium": "medium",
+          "high": "xhigh",
+          "xhigh": "xhigh",
+          "max": null
+        }
+      },
+      "provenance": "imported from existing Pi provider; not independently reverified"
+    },
+    {
+      "id": "dashscope-claude/qwen3.8-max-preview",
+      "name": "dashscope-claude/qwen3.8-max-preview (CPA \u2192 Model Studio Token Plan Anthropic)",
+      "context_window": 1000000,
+      "max_output_tokens": 131072,
+      "input_modalities": [
+        "text",
+        "image"
+      ],
+      "reasoning": true,
+      "cost": {
+        "input": 1.25,
+        "output": 3.75,
+        "cacheRead": 0.25,
+        "cacheWrite": 1.5625
+      },
+      "pi": {
+        "api": "anthropic-messages",
+        "compat": {
+          "supportsDeveloperRole": false
+        },
+        "thinkingLevelMap": {
+          "off": null,
+          "minimal": null,
+          "low": "low",
+          "medium": "medium",
+          "high": "xhigh",
+          "xhigh": "xhigh",
+          "max": null
+        }
+      },
+      "provenance": "imported from existing Pi provider; not independently reverified"
+    },
+    {
+      "id": "composer-2.5",
+      "name": "Composer 2.5 (CPA \u2192 Cursor)",
+      "context_window": 200000,
+      "max_output_tokens": 64000,
+      "input_modalities": [
+        "text",
+        "image"
+      ],
+      "reasoning": true,
+      "cost": {
+        "input": 0.5,
+        "output": 2.5,
+        "cacheRead": 0,
+        "cacheWrite": 0
+      },
+      "pi": {
+        "api": "openai-completions",
+        "headers": {
+          "Originator": "pi"
+        }
+      },
+      "provenance": "imported from existing Pi provider; not independently reverified"
+    },
+    {
+      "id": "cursor-grok-4.5-low",
+      "name": "Cursor Grok 4.5 Low (CPA \u2192 Cursor)",
+      "context_window": 256000,
+      "max_output_tokens": 64000,
+      "input_modalities": [
+        "text",
+        "image"
+      ],
+      "reasoning": false,
+      "cost": {
+        "input": 2,
+        "output": 6,
+        "cacheRead": 0.3,
+        "cacheWrite": 0
+      },
+      "pi": {
+        "api": "openai-completions",
+        "headers": {
+          "Originator": "pi"
+        }
+      },
+      "provenance": "imported from existing Pi provider; not independently reverified"
+    },
+    {
+      "id": "cursor-grok-4.5-medium",
+      "name": "Cursor Grok 4.5 Medium (CPA \u2192 Cursor)",
+      "context_window": 256000,
+      "max_output_tokens": 64000,
+      "input_modalities": [
+        "text",
+        "image"
+      ],
+      "reasoning": false,
+      "cost": {
+        "input": 2,
+        "output": 6,
+        "cacheRead": 0.3,
+        "cacheWrite": 0
+      },
+      "pi": {
+        "api": "openai-completions",
+        "headers": {
+          "Originator": "pi"
+        }
+      },
+      "provenance": "imported from existing Pi provider; not independently reverified"
+    },
+    {
+      "id": "cursor-grok-4.5-high",
+      "name": "Cursor Grok 4.5 High (CPA \u2192 Cursor)",
+      "context_window": 256000,
+      "max_output_tokens": 64000,
+      "input_modalities": [
+        "text",
+        "image"
+      ],
+      "reasoning": false,
+      "cost": {
+        "input": 2,
+        "output": 6,
+        "cacheRead": 0.3,
+        "cacheWrite": 0
+      },
+      "pi": {
+        "api": "openai-completions",
+        "headers": {
+          "Originator": "pi"
+        }
+      },
+      "provenance": "imported from existing Pi provider; not independently reverified"
+    },
+    {
+      "id": "cursor-grok-4.6",
+      "name": "Cursor Grok 4.6 (CPA \u2192 Cursor; /codex Fast mode aware)",
+      "context_window": 256000,
+      "max_output_tokens": 64000,
+      "input_modalities": [
+        "text",
+        "image"
+      ],
+      "reasoning": true,
+      "cost": {
+        "input": 2,
+        "output": 6,
+        "cacheRead": 0,
+        "cacheWrite": 0
+      },
+      "pi": {
+        "api": "openai-completions",
+        "headers": {
+          "Originator": "pi"
+        },
+        "compat": {
+          "sendSessionAffinityHeaders": true
+        },
+        "thinkingLevelMap": {
+          "off": null,
+          "minimal": null,
+          "low": "low",
+          "medium": "medium",
+          "high": "high",
+          "xhigh": "xhigh",
+          "max": null
+        }
+      },
+      "provenance": "imported from existing Pi provider; not independently reverified"
+    },
+    {
+      "id": "claude-opus-5-low",
+      "name": "Cursor Claude Opus 5 Low (CPA \u2192 Cursor)",
+      "context_window": 300000,
+      "max_output_tokens": 128000,
+      "input_modalities": [
+        "text",
+        "image"
+      ],
+      "reasoning": false,
+      "cost": {
+        "input": 5,
+        "output": 25,
+        "cacheRead": 0.5,
+        "cacheWrite": 6.25
+      },
+      "pi": {
+        "api": "openai-completions",
+        "headers": {
+          "Originator": "pi"
+        }
+      },
+      "provenance": "imported from existing Pi provider; not independently reverified"
+    },
+    {
+      "id": "claude-opus-5-medium",
+      "name": "Cursor Claude Opus 5 Medium (CPA \u2192 Cursor)",
+      "context_window": 300000,
+      "max_output_tokens": 128000,
+      "input_modalities": [
+        "text",
+        "image"
+      ],
+      "reasoning": false,
+      "cost": {
+        "input": 5,
+        "output": 25,
+        "cacheRead": 0.5,
+        "cacheWrite": 6.25
+      },
+      "pi": {
+        "api": "openai-completions",
+        "headers": {
+          "Originator": "pi"
+        }
+      },
+      "provenance": "imported from existing Pi provider; not independently reverified"
+    },
+    {
+      "id": "claude-opus-5-high",
+      "name": "Cursor Claude Opus 5 High (CPA \u2192 Cursor)",
+      "context_window": 300000,
+      "max_output_tokens": 128000,
+      "input_modalities": [
+        "text",
+        "image"
+      ],
+      "reasoning": false,
+      "cost": {
+        "input": 5,
+        "output": 25,
+        "cacheRead": 0.5,
+        "cacheWrite": 6.25
+      },
+      "pi": {
+        "api": "openai-completions",
+        "headers": {
+          "Originator": "pi"
+        }
+      },
+      "provenance": "imported from existing Pi provider; not independently reverified"
+    },
+    {
+      "id": "claude-opus-5-thinking-low",
+      "name": "Cursor Claude Opus 5 Thinking Low (CPA \u2192 Cursor)",
+      "context_window": 300000,
+      "max_output_tokens": 128000,
+      "input_modalities": [
+        "text",
+        "image"
+      ],
+      "reasoning": true,
+      "cost": {
+        "input": 5,
+        "output": 25,
+        "cacheRead": 0.5,
+        "cacheWrite": 6.25
+      },
+      "pi": {
+        "api": "openai-completions",
+        "headers": {
+          "Originator": "pi"
+        }
+      },
+      "provenance": "imported from existing Pi provider; not independently reverified"
+    },
+    {
+      "id": "claude-opus-5-thinking-medium",
+      "name": "Cursor Claude Opus 5 Thinking Medium (CPA \u2192 Cursor)",
+      "context_window": 300000,
+      "max_output_tokens": 128000,
+      "input_modalities": [
+        "text",
+        "image"
+      ],
+      "reasoning": true,
+      "cost": {
+        "input": 5,
+        "output": 25,
+        "cacheRead": 0.5,
+        "cacheWrite": 6.25
+      },
+      "pi": {
+        "api": "openai-completions",
+        "headers": {
+          "Originator": "pi"
+        }
+      },
+      "provenance": "imported from existing Pi provider; not independently reverified"
+    },
+    {
+      "id": "claude-opus-5-thinking-high",
+      "name": "Cursor Claude Opus 5 Thinking High (CPA \u2192 Cursor)",
+      "context_window": 300000,
+      "max_output_tokens": 128000,
+      "input_modalities": [
+        "text",
+        "image"
+      ],
+      "reasoning": true,
+      "cost": {
+        "input": 5,
+        "output": 25,
+        "cacheRead": 0.5,
+        "cacheWrite": 6.25
+      },
+      "pi": {
+        "api": "openai-completions",
+        "headers": {
+          "Originator": "pi"
+        }
+      },
+      "provenance": "imported from existing Pi provider; not independently reverified"
+    },
+    {
+      "id": "claude-opus-5-thinking-max",
+      "name": "Cursor Claude Opus 5 Thinking Max (CPA \u2192 Cursor)",
+      "context_window": 300000,
+      "max_output_tokens": 128000,
+      "input_modalities": [
+        "text",
+        "image"
+      ],
+      "reasoning": true,
+      "cost": {
+        "input": 5,
+        "output": 25,
+        "cacheRead": 0.5,
+        "cacheWrite": 6.25
+      },
+      "pi": {
+        "api": "openai-completions",
+        "headers": {
+          "Originator": "pi"
+        }
+      },
+      "provenance": "imported from existing Pi provider; not independently reverified"
+    },
+    {
+      "id": "claude-opus-5-thinking-xhigh",
+      "name": "Cursor Claude Opus 5 Thinking xHigh (CPA \u2192 Cursor)",
+      "context_window": 300000,
+      "max_output_tokens": 128000,
+      "input_modalities": [
+        "text",
+        "image"
+      ],
+      "reasoning": true,
+      "cost": {
+        "input": 5,
+        "output": 25,
+        "cacheRead": 0.5,
+        "cacheWrite": 6.25
+      },
+      "pi": {
+        "api": "openai-completions",
+        "headers": {
+          "Originator": "pi"
+        }
+      },
+      "provenance": "imported from existing Pi provider; not independently reverified"
+    }
+  ],
+  "profiles": {
+    "personal": {
+      "models": [
+        "gpt-5.6-sol",
+        "cursor-grok-4.6",
+        "gpt-5.6-terra",
+        "gpt-5.6-luna",
+        "claude-opus-4-6-thinking",
+        "claude-sonnet-4-6-thinking",
+        "gemini-3.8-flash",
+        "opencode-go/muse-spark-1.3-contributor",
+        "opencode-go/deepseek-v4.1-flash",
+        "devin/swe-2",
+        "gpt-6-astra"
+      ]
+    }
+  }
+}

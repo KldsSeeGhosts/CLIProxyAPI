@@ -161,13 +161,25 @@ func applyCodexClientNonTemplatePriorities(result []map[string]any, templates ma
 }
 
 func loadCodexClientModelTemplates() (map[string]map[string]any, map[string]any, error) {
+	codexClientModelTemplatesMu.Lock()
+	defer codexClientModelTemplatesMu.Unlock()
+	// Check the revision before copying the catalog. Most discovery requests use
+	// the parsed cache and do not need another copy of the full JSON document.
+	if codexClientModelTemplatesLoaded && codexClientModelTemplatesRevision == registry.GetCodexClientModelsRevision() {
+		return codexClientModelTemplates, codexClientDefaultTemplate, codexClientModelTemplatesErr
+	}
 	raw, revision := registry.GetCodexClientModelsSnapshot()
-	return loadCodexClientModelTemplatesSnapshot(raw, revision)
+	return loadCodexClientModelTemplatesSnapshotLocked(raw, revision)
 }
 
 func loadCodexClientModelTemplatesSnapshot(raw []byte, revision uint64) (map[string]map[string]any, map[string]any, error) {
 	codexClientModelTemplatesMu.Lock()
 	defer codexClientModelTemplatesMu.Unlock()
+	return loadCodexClientModelTemplatesSnapshotLocked(raw, revision)
+}
+
+// loadCodexClientModelTemplatesSnapshotLocked requires codexClientModelTemplatesMu.
+func loadCodexClientModelTemplatesSnapshotLocked(raw []byte, revision uint64) (map[string]map[string]any, map[string]any, error) {
 	if codexClientModelTemplatesLoaded && codexClientModelTemplatesRevision == revision {
 		return codexClientModelTemplates, codexClientDefaultTemplate, codexClientModelTemplatesErr
 	}
