@@ -1383,3 +1383,185 @@ func TestConvertAntigravityResponseToClaudeUsesStableGeminiToolProvenanceID(t *t
 		t.Fatalf("stream tool_use.id is not stable: %s", stream)
 	}
 }
+
+func TestConvertAntigravityResponseToClaude_EmitsNativeSignaturesWithoutProviderPrefixes(t *testing.T) {
+	cache.ClearSignatureCache("")
+	previousCache := cache.SignatureCacheEnabled()
+	cache.SetSignatureCacheEnabled(true)
+	t.Cleanup(func() {
+		cache.SetSignatureCacheEnabled(previousCache)
+		cache.ClearSignatureCache("")
+	})
+
+	nativeSig1, upstreamSig1 := testAntigravityClaudeSignature(t)
+	nativePayload2 := buildClaudeSignaturePayload(t, 13, uint64Ptr(2), "claude-opus-4-6", true)
+	nativeSig2 := base64.StdEncoding.EncodeToString(nativePayload2)
+	upstreamSig2 := base64.StdEncoding.EncodeToString([]byte(nativeSig2))
+	requestJSON := []byte(`{"model":"claude-sonnet-4-6"}`)
+	responseJSON := []byte(`{"response":{"candidates":[{"content":{"parts":[{"text":"thought content","thought":true,"thoughtSignature":"` + upstreamSig1 + `"},{"functionCall":{"id":"native-id","name":"run_command","args":{"command":"true"}},"thoughtSignature":"` + upstreamSig2 + `"}]},"finishReason":"STOP"}],"usageMetadata":{"promptTokenCount":1,"candidatesTokenCount":1,"thoughtsTokenCount":1,"totalTokenCount":3},"modelVersion":"claude-sonnet-4-6-thinking","responseId":"resp-claude-native-sigs"}}`)
+
+	nonStream := ConvertAntigravityResponseToClaudeNonStream(context.Background(), "claude-sonnet-4-6", requestJSON, requestJSON, responseJSON, nil)
+	content := gjson.GetBytes(nonStream, "content").Array()
+	if len(content) != 2 {
+		t.Fatalf("content blocks = %d, want thinking + tool; output=%s", len(content), nonStream)
+	}
+	thinkingSig := content[0].Get("signature").String()
+	toolSig := content[1].Get("signature").String()
+
+	if strings.Contains(thinkingSig, "#") {
+		t.Fatalf("thinking signature contains prefix: %q, want provider-native %q", thinkingSig, nativeSig1)
+	}
+	if strings.Contains(toolSig, "#") {
+		t.Fatalf("tool signature contains prefix: %q, want provider-native %q", toolSig, nativeSig2)
+	}
+	if thinkingSig != nativeSig1 {
+		t.Fatalf("thinking signature = %q, want provider-native %q", thinkingSig, nativeSig1)
+	}
+	if toolSig != nativeSig2 {
+		t.Fatalf("tool signature = %q, want provider-native %q", toolSig, nativeSig2)
+	}
+
+	var param any
+	stream := bytes.Join(ConvertAntigravityResponseToClaude(context.Background(), "claude-sonnet-4-6", requestJSON, requestJSON, responseJSON, &param), nil)
+	streamText := string(stream)
+	if strings.Contains(streamText, `"signature":"claude#`) {
+		t.Fatalf("streaming response contains claude# prefix: %s", streamText)
+	}
+	if !strings.Contains(streamText, `"signature":"`+toolSig+`"`) {
+		t.Fatalf("streaming tool signature missing or mismatched: %s", streamText)
+	}
+
+	// Verify multi-turn replay with native signatures in cache mode
+	replayRequest := []byte(`{"model":"claude-sonnet-4-6","messages":[{"role":"assistant","content":[]},{"role":"user","content":[{"type":"text","text":"continue"}]}]}`)
+	replayRequest, _ = sjson.SetRawBytes(replayRequest, "messages.0.content", []byte(gjson.GetBytes(nonStream, "content").Raw))
+	replayRequest = StripEmptySignatureThinkingBlocks(replayRequest)
+	translated := ConvertClaudeRequestToAntigravity("claude-sonnet-4-6", replayRequest, false)
+	parts := gjson.GetBytes(translated, "request.contents.0.parts").Array()
+	if len(parts) != 2 || parts[0].Get("thoughtSignature").String() != upstreamSig1 || parts[1].Get("thoughtSignature").String() != upstreamSig2 {
+		t.Fatalf("Claude native thought/tool signatures did not round-trip in cache mode: %s", translated)
+	}
+}
+
+func TestConvertAntigravityResponseToClaudeStream_EmptyTextPartKeepsThinkingBlockOpen(t *testing.T) {
+	requestJSON := []byte(`{"model":"gemini-3-flash-agent"}`)
+	thinkingChunk := []byte(`{"response":{"candidates":[{"content":{"role":"model","parts":[{"text":"Thinking","thought":true}]}}],"responseId":"resp-1"}}`)
+	emptyTextChunk := []byte(`{"response":{"candidates":[{"content":{"role":"model","parts":[{"text":""}]}}]}}`)
+	finishChunk := []byte(`{"response":{"candidates":[{"content":{"role":"model","parts":[{"text":""}]},"finishReason":"STOP"}],"usageMetadata":{"promptTokenCount":100,"thoughtsTokenCount":20,"totalTokenCount":120}}}`)
+
+	var param any
+	ctx := context.Background()
+	output1 := bytes.Join(ConvertAntigravityResponseToClaude(ctx, "gemini-3-flash-agent", requestJSON, requestJSON, thinkingChunk, &param), nil)
+	if !strings.Contains(string(output1), `"type":"content_block_start","index":0,"content_block":{"type":"thinking"`) {
+		t.Fatalf("expected thinking block start at index 0: %s", string(output1))
+	}
+
+	// Verify empty text chunk does not close thinking block or emit content_block_stop
+	output2 := bytes.Join(ConvertAntigravityResponseToClaude(ctx, "gemini-3-flash-agent", requestJSON, requestJSON, emptyTextChunk, &param), nil)
+	if strings.Contains(string(output2), "content_block_stop") {
+		t.Fatalf("empty text chunk should not emit content_block_stop: %s", string(output2))
+	}
+
+	output3 := bytes.Join(ConvertAntigravityResponseToClaude(ctx, "gemini-3-flash-agent", requestJSON, requestJSON, finishChunk, &param), nil)
+	output4 := bytes.Join(ConvertAntigravityResponseToClaude(ctx, "gemini-3-flash-agent", requestJSON, requestJSON, []byte("[DONE]"), &param), nil)
+
+	fullOutput := string(output1) + string(output2) + string(output3) + string(output4)
+
+	started := make(map[int64]bool)
+	stopped := make(map[int64]bool)
+	for _, line := range strings.Split(fullOutput, "\n") {
+		trimmed := strings.TrimSpace(line)
+		if !strings.HasPrefix(trimmed, "data: ") {
+			continue
+		}
+		data := strings.TrimPrefix(trimmed, "data: ")
+		eventType := gjson.Get(data, "type").String()
+		switch eventType {
+		case "content_block_start":
+			idx := gjson.Get(data, "index").Int()
+			started[idx] = true
+		case "content_block_delta":
+			idx := gjson.Get(data, "index").Int()
+			if !started[idx] {
+				t.Fatalf("event %s for index %d before content_block_start; full stream:\n%s", eventType, idx, fullOutput)
+			}
+			if stopped[idx] {
+				t.Fatalf("event %s for index %d after content_block_stop; full stream:\n%s", eventType, idx, fullOutput)
+			}
+		case "content_block_stop":
+			idx := gjson.Get(data, "index").Int()
+			if !started[idx] {
+				t.Fatalf("event %s for index %d before content_block_start; full stream:\n%s", eventType, idx, fullOutput)
+			}
+			if stopped[idx] {
+				t.Fatalf("duplicate content_block_stop for index %d; full stream:\n%s", idx, fullOutput)
+			}
+			stopped[idx] = true
+		}
+	}
+
+	if len(started) != 1 || !started[0] {
+		t.Fatalf("expected exactly 1 started block at index 0, got: %v", started)
+	}
+	if len(stopped) != 1 || !stopped[0] {
+		t.Fatalf("expected exactly 1 stopped block at index 0, got: %v", stopped)
+	}
+}
+
+func TestConvertAntigravityResponseToClaudeStream_EmptyTextPartFollowedByThinkingAndText(t *testing.T) {
+	requestJSON := []byte(`{"model":"gemini-3-flash-agent"}`)
+	thinkingChunk1 := []byte(`{"response":{"candidates":[{"content":{"role":"model","parts":[{"text":"Thinking 1... ","thought":true}]}}],"responseId":"resp-2"}}`)
+	emptyTextChunk := []byte(`{"response":{"candidates":[{"content":{"role":"model","parts":[{"text":""}]}}]}}`)
+	thinkingChunk2 := []byte(`{"response":{"candidates":[{"content":{"role":"model","parts":[{"text":"Thinking 2...","thought":true}]}}]}}`)
+	textChunk := []byte(`{"response":{"candidates":[{"content":{"role":"model","parts":[{"text":"Hello world"}]}}]}}`)
+	finishChunk := []byte(`{"response":{"candidates":[{"content":{"role":"model","parts":[{"text":""}]},"finishReason":"STOP"}],"usageMetadata":{"promptTokenCount":100,"thoughtsTokenCount":20,"totalTokenCount":120}}}`)
+
+	var param any
+	ctx := context.Background()
+	output := bytes.Join(ConvertAntigravityResponseToClaude(ctx, "gemini-3-flash-agent", requestJSON, requestJSON, thinkingChunk1, &param), nil)
+	output = append(output, bytes.Join(ConvertAntigravityResponseToClaude(ctx, "gemini-3-flash-agent", requestJSON, requestJSON, emptyTextChunk, &param), nil)...)
+	output = append(output, bytes.Join(ConvertAntigravityResponseToClaude(ctx, "gemini-3-flash-agent", requestJSON, requestJSON, thinkingChunk2, &param), nil)...)
+	output = append(output, bytes.Join(ConvertAntigravityResponseToClaude(ctx, "gemini-3-flash-agent", requestJSON, requestJSON, textChunk, &param), nil)...)
+	output = append(output, bytes.Join(ConvertAntigravityResponseToClaude(ctx, "gemini-3-flash-agent", requestJSON, requestJSON, finishChunk, &param), nil)...)
+	output = append(output, bytes.Join(ConvertAntigravityResponseToClaude(ctx, "gemini-3-flash-agent", requestJSON, requestJSON, []byte("[DONE]"), &param), nil)...)
+
+	fullOutput := string(output)
+	started := make(map[int64]bool)
+	stopped := make(map[int64]bool)
+	for _, line := range strings.Split(fullOutput, "\n") {
+		trimmed := strings.TrimSpace(line)
+		if !strings.HasPrefix(trimmed, "data: ") {
+			continue
+		}
+		data := strings.TrimPrefix(trimmed, "data: ")
+		eventType := gjson.Get(data, "type").String()
+		switch eventType {
+		case "content_block_start":
+			idx := gjson.Get(data, "index").Int()
+			started[idx] = true
+		case "content_block_delta":
+			idx := gjson.Get(data, "index").Int()
+			if !started[idx] {
+				t.Fatalf("event %s for index %d before content_block_start; full stream:\n%s", eventType, idx, fullOutput)
+			}
+			if stopped[idx] {
+				t.Fatalf("event %s for index %d after content_block_stop; full stream:\n%s", eventType, idx, fullOutput)
+			}
+		case "content_block_stop":
+			idx := gjson.Get(data, "index").Int()
+			if !started[idx] {
+				t.Fatalf("event %s for index %d before content_block_start; full stream:\n%s", eventType, idx, fullOutput)
+			}
+			if stopped[idx] {
+				t.Fatalf("duplicate content_block_stop for index %d; full stream:\n%s", idx, fullOutput)
+			}
+			stopped[idx] = true
+		}
+	}
+
+	if len(started) != 2 || !started[0] || !started[1] {
+		t.Fatalf("expected exactly 2 started blocks (0=thinking, 1=text), got: %v", started)
+	}
+	if len(stopped) != 2 || !stopped[0] || !stopped[1] {
+		t.Fatalf("expected exactly 2 stopped blocks (0=thinking, 1=text), got: %v", stopped)
+	}
+}
