@@ -84,7 +84,14 @@ func ConvertOpenAIRequestToCodex(modelName string, inputRawJSON []byte, stream b
 				var name string
 				switch tool.Get("type").String() {
 				case "function":
+					// Accept both the Chat Completions nested envelope
+					// ("function":{"name":...}) and the already-flattened
+					// Responses shape ({"name":...} at top level) emitted by
+					// the cpa-responses-shim.
 					name = tool.Get("function.name").String()
+					if name == "" {
+						name = tool.Get("name").String()
+					}
 					functionToolNames[name] = struct{}{}
 				case "custom":
 					name = tool.Get("name").String()
@@ -448,26 +455,31 @@ func ConvertOpenAIRequestToCodex(modelName string, inputRawJSON []byte, stream b
 			if toolType == "function" {
 				item := []byte(`{}`)
 				item, _ = sjson.SetBytes(item, "type", "function")
+				// Prefer the nested Chat Completions envelope. When the shim
+				// already flattened the tool to the Responses shape the fields
+				// sit at the top level, so fall back to those.
 				fn := t.Get("function")
-				if fn.Exists() {
-					if v := fn.Get("name"); v.Exists() {
-						name := v.String()
-						if short, ok := originalToolNameMap[name]; ok {
-							name = short
-						} else {
-							name = shortenNameIfNeeded(name)
-						}
-						item, _ = sjson.SetBytes(item, "name", name)
+				src := fn
+				if !src.Exists() {
+					src = t
+				}
+				if v := src.Get("name"); v.Exists() {
+					name := v.String()
+					if short, ok := originalToolNameMap[name]; ok {
+						name = short
+					} else {
+						name = shortenNameIfNeeded(name)
 					}
-					if v := fn.Get("description"); v.Exists() {
-						item, _ = sjson.SetBytes(item, "description", v.Value())
-					}
-					if v := fn.Get("parameters"); v.Exists() {
-						item, _ = sjson.SetRawBytes(item, "parameters", []byte(v.Raw))
-					}
-					if v := fn.Get("strict"); v.Exists() {
-						item, _ = sjson.SetBytes(item, "strict", v.Value())
-					}
+					item, _ = sjson.SetBytes(item, "name", name)
+				}
+				if v := src.Get("description"); v.Exists() {
+					item, _ = sjson.SetBytes(item, "description", v.Value())
+				}
+				if v := src.Get("parameters"); v.Exists() {
+					item, _ = sjson.SetRawBytes(item, "parameters", []byte(v.Raw))
+				}
+				if v := src.Get("strict"); v.Exists() {
+					item, _ = sjson.SetBytes(item, "strict", v.Value())
 				}
 				toolItems = append(toolItems, item)
 			}

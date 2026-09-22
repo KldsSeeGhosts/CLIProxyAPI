@@ -120,8 +120,10 @@ func emitEvent(event string, payload []byte) []byte {
 
 // ConvertGeminiResponseToOpenAIResponses converts Gemini SSE chunks into OpenAI Responses SSE events.
 func ConvertGeminiResponseToOpenAIResponses(_ context.Context, modelName string, originalRequestRawJSON, requestRawJSON, rawJSON []byte, param *any) [][]byte {
-	reqJSON := pickRequestJSON(originalRequestRawJSON, requestRawJSON)
 	if *param == nil {
+		// Request bodies may contain tens of megabytes of media. Validate once
+		// when initializing stream state, not again for every token chunk.
+		reqJSON := pickRequestJSON(originalRequestRawJSON, requestRawJSON)
 		*param = &geminiToResponsesState{
 			FuncArgsBuf:             make(map[int]*strings.Builder),
 			FuncInputBuf:            make(map[int]string),
@@ -174,9 +176,15 @@ func ConvertGeminiResponseToOpenAIResponses(_ context.Context, modelName string,
 	}
 	if st.SanitizedNameMap == nil {
 		st.SanitizedNameMap = util.SanitizedToolNameMap(originalRequestRawJSON)
+		if st.SanitizedNameMap == nil {
+			st.SanitizedNameMap = make(map[string]string)
+		}
 	}
 	if st.ToolIdentityMap == nil {
-		st.ToolIdentityMap = util.ResponsesToolReverseIdentityMap(reqJSON)
+		st.ToolIdentityMap = util.ResponsesToolReverseIdentityMap(pickRequestJSON(originalRequestRawJSON, requestRawJSON))
+		if st.ToolIdentityMap == nil {
+			st.ToolIdentityMap = make(map[string]util.ResponsesToolIdentity)
+		}
 	}
 
 	if bytes.HasPrefix(rawJSON, []byte("data:")) {

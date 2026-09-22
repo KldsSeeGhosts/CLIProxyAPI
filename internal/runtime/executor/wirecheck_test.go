@@ -84,4 +84,3 @@ func TestWireHeadersAfterSendBoundary(t *testing.T) {
 		t.Error("missing per-request UUID headers")
 	}
 }
-

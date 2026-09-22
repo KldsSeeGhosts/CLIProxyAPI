@@ -62,7 +62,7 @@ const (
 	// only, which is why the bare UA is not the right wire value.
 	zcodeSDKAnthropicVersion = "ai-sdk/anthropic/3.0.81"
 	zcodeSDKProviderUtilsUA  = "ai-sdk/provider-utils/4.0.27"
-	zcodeRuntimeUA            = "runtime/node.js/v24.14.0"
+	zcodeRuntimeUA           = "runtime/node.js/v24.14.0"
 
 	// Session types: main-agent turns send "main"; background helpers
 	// (compaction, titles) send "other".

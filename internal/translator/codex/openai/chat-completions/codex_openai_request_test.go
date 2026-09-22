@@ -1404,3 +1404,49 @@ func TestToolsDefinitionTranslated(t *testing.T) {
 		t.Errorf("tool 'search' not found in output tools: %s", gjson.Get(result, "tools").Raw)
 	}
 }
+
+func TestFlattenedFunctionToolsPreserveFields(t *testing.T) {
+	// cpa-responses-shim flattens Chat Completions tools to the Responses shape
+	// ({"type":"function","name":...,"parameters":...}) before forwarding. The
+	// translator must keep name/description/parameters instead of emitting a
+	// bare {"type":"function"} that upstreams reject with
+	// "tools[N] missing required field `name`".
+	input := []byte(`{
+		"model": "opencode-go/muse-spark-1.3-contributor",
+		"messages": [{"role": "user", "content": "hi"}],
+		"tools": [
+			{
+				"type": "function",
+				"name": "browser_exec",
+				"description": "Run browser code",
+				"parameters": {"type": "object", "properties": {"code": {"type": "string"}}, "required": ["code"]},
+				"strict": true
+			},
+			{
+				"type": "function",
+				"function": {"name": "nested_tool", "description": "nested", "parameters": {"type": "object", "properties": {}}}
+			}
+		]
+	}`)
+
+	out := ConvertOpenAIRequestToCodex("muse-spark-1.3-contributor", input, true)
+	tools := gjson.GetBytes(out, "tools").Array()
+	if len(tools) != 2 {
+		t.Fatalf("expected 2 tools, got %d: %s", len(tools), gjson.GetBytes(out, "tools").Raw)
+	}
+	if got := tools[0].Get("name").String(); got != "browser_exec" {
+		t.Errorf("flattened tool lost name: got %q", got)
+	}
+	if got := tools[0].Get("description").String(); got != "Run browser code" {
+		t.Errorf("flattened tool lost description: got %q", got)
+	}
+	if !tools[0].Get("parameters.required").Exists() {
+		t.Errorf("flattened tool lost parameters: %s", tools[0].Raw)
+	}
+	if got := tools[0].Get("strict").String(); got != "true" {
+		t.Errorf("flattened tool lost strict: got %q", got)
+	}
+	if got := tools[1].Get("name").String(); got != "nested_tool" {
+		t.Errorf("nested-envelope tool broke: got %q", got)
+	}
+}

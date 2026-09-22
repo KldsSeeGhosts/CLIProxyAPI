@@ -3,6 +3,7 @@ package management
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -314,4 +315,54 @@ func TestAuthByIndexDistinguishesSharedAPIKeysAcrossProviders(t *testing.T) {
 	if gotCompat.ID != compatAuth.ID {
 		t.Fatalf("authByIndex(compat) returned %q, want %q", gotCompat.ID, compatAuth.ID)
 	}
+}
+
+func TestAPICallInjectsOpenCodeSession(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+
+	var capturedSession string
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		capturedSession = r.Header.Get("x-opencode-session")
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"status":"ok"}`))
+	}))
+	defer server.Close()
+
+	h := &Handler{}
+
+	t.Run("injects session when url contains opencode.ai", func(t *testing.T) {
+		capturedSession = ""
+		w := httptest.NewRecorder()
+		c, _ := gin.CreateTestContext(w)
+		reqBody := fmt.Sprintf(`{"method":"POST","url":"%s/zen/go/v1/chat/completions","data":"{}"}`, server.URL)
+		// We override host/url to match opencode.ai check while pointing to test server
+		reqBody = fmt.Sprintf(`{"method":"POST","url":"%s/opencode.ai/test","data":"{}"}`, server.URL)
+		c.Request = httptest.NewRequest(http.MethodPost, "/v0/management/api-call", strings.NewReader(reqBody))
+		c.Request.Header.Set("Content-Type", "application/json")
+
+		h.APICall(c)
+		if w.Code != http.StatusOK {
+			t.Fatalf("expected status 200, got %d", w.Code)
+		}
+		if capturedSession == "" || !strings.HasPrefix(capturedSession, "cpa-dashboard-test-") {
+			t.Fatalf("expected x-opencode-session with prefix cpa-dashboard-test-, got %q", capturedSession)
+		}
+	})
+
+	t.Run("preserves explicit session header", func(t *testing.T) {
+		capturedSession = ""
+		w := httptest.NewRecorder()
+		c, _ := gin.CreateTestContext(w)
+		reqBody := fmt.Sprintf(`{"method":"POST","url":"%s/opencode.ai/test","header":{"x-opencode-session":"custom-session-123"},"data":"{}"}`, server.URL)
+		c.Request = httptest.NewRequest(http.MethodPost, "/v0/management/api-call", strings.NewReader(reqBody))
+		c.Request.Header.Set("Content-Type", "application/json")
+
+		h.APICall(c)
+		if w.Code != http.StatusOK {
+			t.Fatalf("expected status 200, got %d", w.Code)
+		}
+		if capturedSession != "custom-session-123" {
+			t.Fatalf("expected custom-session-123, got %q", capturedSession)
+		}
+	})
 }

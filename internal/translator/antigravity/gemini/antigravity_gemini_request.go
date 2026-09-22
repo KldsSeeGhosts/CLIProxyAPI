@@ -662,6 +662,9 @@ func normalizeAntigravityInlineDataPart(part gjson.Result) ([]byte, bool) {
 	out := []byte(`{"inlineData":{"mimeType":"","data":""}}`)
 	out, _ = sjson.SetBytes(out, "inlineData.mimeType", mimeType)
 	out, _ = sjson.SetBytes(out, "inlineData.data", data)
+	if metadata := part.Get("videoMetadata"); metadata.IsObject() && strings.HasPrefix(mimeType, "video/") {
+		out, _ = sjson.SetRawBytes(out, "videoMetadata", []byte(metadata.Raw))
+	}
 	return out, true
 }
 

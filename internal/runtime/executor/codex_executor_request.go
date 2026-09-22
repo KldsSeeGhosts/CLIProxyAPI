@@ -152,6 +152,9 @@ func (e *CodexExecutor) cacheHelper(ctx context.Context, from sdktranslator.Form
 	}
 	if cache.ID != "" {
 		httpReq.Header.Set("Session-Id", cache.ID)
+		if strings.Contains(strings.ToLower(url), "opencode.ai") || (auth != nil && strings.Contains(strings.ToLower(auth.Provider), "opencode")) {
+			httpReq.Header.Set("x-opencode-session", cache.ID)
+		}
 	}
 	return httpReq, rawJSON, identityState, nil
 }
@@ -336,6 +339,7 @@ func applyCodexHeadersFromSources(r *http.Request, auth *cliproxyauth.Auth, toke
 	misc.EnsureHeader(r.Header, ginHeaders, "X-Codex-Window-Id", "")
 	misc.EnsureHeader(r.Header, ginHeaders, "Thread-Id", "")
 	misc.EnsureHeader(r.Header, ginHeaders, "Session-Id", "")
+	misc.EnsureHeader(r.Header, ginHeaders, "x-opencode-session", "")
 	misc.EnsureHeader(r.Header, ginHeaders, "X-Openai-Internal-Codex-Responses-Lite", "")
 
 	cfgUserAgent, _ := codexHeaderDefaults(cfg, auth)
@@ -366,6 +370,11 @@ func applyCodexHeadersFromSources(r *http.Request, auth *cliproxyauth.Auth, toke
 		attrs = auth.Attributes
 	}
 	util.ApplyCustomHeadersFromAttrs(r, attrs, ginHeaders)
+	if (strings.Contains(strings.ToLower(r.URL.String()), "opencode.ai") || (auth != nil && strings.Contains(strings.ToLower(auth.Provider), "opencode"))) && r.Header.Get("x-opencode-session") == "" {
+		if sid := r.Header.Get("Session-Id"); sid != "" {
+			r.Header.Set("x-opencode-session", sid)
+		}
+	}
 	applyCodexCloakingHeaders(r.Header, cfg)
 }
 

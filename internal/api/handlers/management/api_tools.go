@@ -11,6 +11,7 @@ import (
 	"time"
 
 	"github.com/gin-gonic/gin"
+	"github.com/google/uuid"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/config"
 	coreauth "github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/auth"
 	"github.com/router-for-me/CLIProxyAPI/v7/sdk/proxyutil"
@@ -182,6 +183,12 @@ func (h *Handler) APICall(c *gin.Context) {
 	}
 	if hostOverride != "" {
 		req.Host = hostOverride
+	}
+
+	if strings.Contains(strings.ToLower(urlStr), "opencode.ai") || (auth != nil && strings.Contains(strings.ToLower(auth.Provider), "opencode")) {
+		if req.Header.Get("x-opencode-session") == "" && req.Header.Get("Session-Id") == "" {
+			req.Header.Set("x-opencode-session", "cpa-dashboard-test-"+uuid.New().String())
+		}
 	}
 
 	httpClient := &http.Client{

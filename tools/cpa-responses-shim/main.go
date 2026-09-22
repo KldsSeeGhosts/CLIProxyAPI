@@ -215,7 +215,7 @@ func rewriteResponseJSON(body []byte) ([]byte, bool, error) {
 
 	changed := false
 	if isGeminiModel(model) {
-		changed = stripGeminiReplayFields(root) || changed
+		changed = sanitizeGeminiReplay(root) || changed
 	}
 	if isMuseModel(model) {
 		changed = sanitizeMuseContextManagement(root) || changed
@@ -289,7 +289,35 @@ func sanitizeMuseContextManagement(root map[string]any) bool {
 	return false
 }
 
-// stripGeminiReplayFields removes only replay/signature carriers. Summaries,
+// Keep CPA's typed Gemini carriers on top-level reasoning items. The backend
+// validates their envelope, provider, and semantic target before replay. Raw
+// foreign signatures still pass through the legacy sanitizer.
+func sanitizeGeminiReplay(root map[string]any) bool {
+	type carrier struct {
+		item  map[string]any
+		value string
+	}
+	var preserved []carrier
+	if input, ok := root["input"].([]any); ok {
+		for _, value := range input {
+			item, ok := value.(map[string]any)
+			if !ok || item["type"] != "reasoning" {
+				continue
+			}
+			if value, ok := item["encrypted_content"].(string); ok && strings.HasPrefix(value, "cpa-gemini-responses-carrier-v1:") {
+				preserved = append(preserved, carrier{item, value})
+				delete(item, "encrypted_content")
+			}
+		}
+	}
+	changed := stripGeminiReplayFields(root)
+	for _, saved := range preserved {
+		saved.item["encrypted_content"] = saved.value
+	}
+	return changed
+}
+
+// stripGeminiReplayFields removes untyped replay/signature fields. Summaries,
 // messages, function calls, and their outputs remain intact.
 func stripGeminiReplayFields(value any) bool {
 	changed := false

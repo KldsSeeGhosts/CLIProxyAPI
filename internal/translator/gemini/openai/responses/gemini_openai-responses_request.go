@@ -178,6 +178,8 @@ func ConvertOpenAIResponsesRequestToGemini(modelName string, inputRawJSON []byte
 									partJSON = geminiResponsesInlineDataPart(mimeType, data)
 								}
 							}
+						case "input_video":
+							partJSON = openAIResponsesVideoPart(contentItem)
 						case "input_audio":
 							audioData := contentItem.Get("data").String()
 							audioFormat := contentItem.Get("format").String()
@@ -752,6 +754,38 @@ func parseOpenAIResponsesDataURL(imageURL string) (string, string) {
 	return mimeType, data
 }
 
+// input_video is the CPA extension to Responses used by Pi's view_video tool.
+// Keep video metadata on the same Gemini part as the media bytes.
+func openAIResponsesVideoPart(block gjson.Result) []byte {
+	videoURL := block.Get("video_url")
+	if videoURL.IsObject() {
+		videoURL = videoURL.Get("url")
+	}
+	if videoURL.Type != gjson.String || !strings.Contains(videoURL.String(), ";base64,") {
+		return nil
+	}
+	mimeType, data := parseOpenAIResponsesDataURL(videoURL.String())
+	if data == "" || !strings.HasPrefix(mimeType, "video/") {
+		return nil
+	}
+	part := geminiResponsesInlineDataPart(mimeType, data)
+	metadata := block.Get("video_metadata")
+	if !metadata.Exists() {
+		metadata = block.Get("videoMetadata")
+	}
+	if metadata.IsObject() {
+		if fps := metadata.Get("fps"); fps.Type == gjson.Number && fps.Float() > 0 && fps.Float() <= 24 {
+			part, _ = sjson.SetBytes(part, "videoMetadata.fps", fps.Float())
+		}
+		for _, key := range []string{"startOffset", "endOffset"} {
+			if offset := metadata.Get(key); offset.Type == gjson.String {
+				part, _ = sjson.SetBytes(part, "videoMetadata."+key, offset.String())
+			}
+		}
+	}
+	return part
+}
+
 func openAIResponsesImageFromBlock(block gjson.Result) (mimeType string, data string, ok bool) {
 	blockType := block.Get("type").String()
 	switch blockType {
@@ -797,6 +831,13 @@ func parseOpenAIResponsesArrayOutput(outputResult gjson.Result) (result string, 
 	var hasNonTextBlock bool
 
 	outputResult.ForEach(func(_, block gjson.Result) bool {
+		if block.Get("type").String() == "input_video" {
+			if part := openAIResponsesVideoPart(block); len(part) > 0 {
+				hasContentBlock = true
+				imageParts = append(imageParts, part)
+				return true
+			}
+		}
 		if mimeType, data, ok := openAIResponsesImageFromBlock(block); ok {
 			hasContentBlock = true
 			imageParts = append(imageParts, geminiResponsesInlineDataPart(mimeType, data))
