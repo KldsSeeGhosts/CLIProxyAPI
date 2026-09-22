@@ -202,7 +202,6 @@ func (e *ClaudeExecutor) Execute(ctx context.Context, auth *cliproxyauth.Auth, r
 
 	// Disable thinking if tool_choice forces tool use (Anthropic API constraint)
 	body = disableThinkingIfToolChoiceForced(body)
-	body = e.applyBodyNormalizer(ctx, body, auth, opts)
 	body = reconcileClaudeCodeContextManagement(body, contextManagementState)
 	body = normalizeClaudeSamplingForUpstream(body, confirmedClaudeCode)
 

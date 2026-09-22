@@ -13,7 +13,6 @@ import (
 	sigcompat "github.com/router-for-me/CLIProxyAPI/v7/internal/signature"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/util"
 	cliproxyauth "github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/auth"
-	cliproxyexecutor "github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/executor"
 	log "github.com/sirupsen/logrus"
 	"github.com/tidwall/gjson"
 	"github.com/tidwall/sjson"
@@ -26,18 +25,6 @@ type ClaudeExecutor struct {
 	requestLogProvider      string
 	upstreamModelNormalizer func(string) string
 	oauthProfileFetcher     claudeOAuthProfileFetcher
-	// bodyNormalizer optionally rewrites the fully assembled upstream body
-	// after translation, thinking application, cloaking and payload rules. It
-	// receives the executor options so it can consult the original caller
-	// request (e.g. the OpenAI reasoning_effort intent). It returns the body
-	// unchanged when nil. ZAIExecutor uses it to apply the ZCode harness body
-	// shape.
-	bodyNormalizer func(ctx context.Context, body []byte, auth *cliproxyauth.Auth, opts cliproxyexecutor.Options) []byte
-	// providerKey overrides the provider identity used for usage attribution,
-	// request logging, and thinking model-capability lookups when this executor
-	// is embedded by another (e.g. ZAIExecutor sets "zai"). Empty falls back to
-	// Identifier().
-	providerKey string
 }
 
 type claudeOAuthCancellationError struct {
@@ -165,25 +152,9 @@ func (e *ClaudeExecutor) upstreamRequestLogProvider() string {
 }
 
 // ProviderKey returns the provider key used for usage attribution, request
-// logging, and thinking model-capability lookups. It defaults to the executor
-// identifier but can be overridden (ZAIExecutor sets "zai") so requests that
-// reuse the Claude wire format are still attributed to the real provider and
-// resolve model capabilities from the correct catalog.
+// logging, and thinking model-capability lookups.
 func (e *ClaudeExecutor) ProviderKey() string {
-	if strings.TrimSpace(e.providerKey) != "" {
-		return e.providerKey
-	}
 	return e.Identifier()
-}
-
-// applyBodyNormalizer runs the optional per-executor body normalizer. The
-// ZCode harness profile (ZAIExecutor) rewrites the assembled body here, after
-// every shared Claude pipeline stage has run.
-func (e *ClaudeExecutor) applyBodyNormalizer(ctx context.Context, body []byte, auth *cliproxyauth.Auth, opts cliproxyexecutor.Options) []byte {
-	if e.bodyNormalizer == nil {
-		return body
-	}
-	return e.bodyNormalizer(ctx, body, auth, opts)
 }
 
 func (e *ClaudeExecutor) upstreamModel(baseModel string) string {

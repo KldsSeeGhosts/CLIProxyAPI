@@ -14,7 +14,6 @@ func init() {
 	registerRefreshLead("kimi-ai", func() Authenticator { return NewKimiAIAuthenticator() })
 	registerRefreshLead("kimi.ai", func() Authenticator { return NewKimiAIDotAuthenticator() })
 	registerRefreshLead("xai", func() Authenticator { return NewXAIAuthenticator() })
-	registerRefreshLead("zai", func() Authenticator { return NewZAIAuthenticator() })
 	registerRefreshLead("devin", func() Authenticator { return NewDevinAuthenticator() })
 	registerRefreshLead("meta", func() Authenticator { return NewMetaAuthenticator() })
 }

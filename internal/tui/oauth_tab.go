@@ -342,19 +342,6 @@ func (m oauthTabModel) cancelOAuthSession(state string) tea.Cmd {
 	}
 }
 
-// supportsManualCallback reports whether the current provider accepts the manual
-// callback-URL submission via /v0/management/oauth-callback. Z.AI international
-// completes through a server-side poll (nothing to paste), so its manual input is
-// hidden; BigModel uses a loopback callback a remote browser can paste back.
-func (m oauthTabModel) supportsManualCallback() bool {
-	for _, p := range oauthProviders {
-		if p.name == m.providerName {
-			return p.apiPath != "zai-auth-url"
-		}
-	}
-	return true
-}
-
 func (m oauthTabModel) submitCallback(callbackURL string) tea.Cmd {
 	return func() tea.Msg {
 		// Determine provider from current context
@@ -375,8 +362,6 @@ func (m oauthTabModel) submitCallback(callbackURL string) tea.Cmd {
 					providerKey = "kimi-ai"
 				case "xai-auth-url":
 					providerKey = "xai"
-				case "zai-auth-url", "bigmodel-auth-url":
-					providerKey = "zai"
 				case "meta-auth-url":
 					providerKey = "meta"
 				}
@@ -586,22 +571,19 @@ func (m oauthTabModel) renderRemoteMode() string {
 	sb.WriteString(helpStyle.Render(T("oauth_remote_hint")))
 	sb.WriteString("\n\n")
 
-	// Callback URL input — only for providers that accept a manual callback.
-	// Z.AI / BigModel complete via the server-side loopback/poll flow instead.
-	if m.supportsManualCallback() {
-		sb.WriteString(lipgloss.NewStyle().Bold(true).Foreground(colorInfo).Render(T("oauth_callback_url")))
+	// Callback URL input for the manual callback flow.
+	sb.WriteString(lipgloss.NewStyle().Bold(true).Foreground(colorInfo).Render(T("oauth_callback_url")))
+	sb.WriteString("\n")
+
+	if m.inputActive {
+		sb.WriteString(m.callbackInput.View())
 		sb.WriteString("\n")
-
-		if m.inputActive {
-			sb.WriteString(m.callbackInput.View())
-			sb.WriteString("\n")
-			sb.WriteString(helpStyle.Render("  " + T("enter_submit") + " • " + T("esc_cancel")))
-		} else {
-			sb.WriteString(helpStyle.Render(T("oauth_press_c")))
-		}
-
-		sb.WriteString("\n\n")
+		sb.WriteString(helpStyle.Render("  " + T("enter_submit") + " • " + T("esc_cancel")))
+	} else {
+		sb.WriteString(helpStyle.Render(T("oauth_press_c")))
 	}
+
+	sb.WriteString("\n\n")
 
 	sb.WriteString(warningStyle.Render(T("oauth_waiting")))
 

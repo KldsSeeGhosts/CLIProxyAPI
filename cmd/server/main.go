@@ -113,8 +113,6 @@ func main() {
 	var kimiLogin bool
 	var kimiAILogin bool
 	var xaiLogin bool
-	var zaiLogin bool
-	var zaiProvider string
 	var devinLogin bool
 	var metaLogin bool
 	var discoverGateways bool
@@ -143,8 +141,6 @@ func main() {
 	flag.BoolVar(&kimiLogin, "kimi-login", false, "Login to Kimi (.com) using OAuth")
 	flag.BoolVar(&kimiAILogin, "kimi-ai-login", false, "Login to Kimi.ai using OAuth")
 	flag.BoolVar(&xaiLogin, "xai-login", false, "Login to xAI using OAuth")
-	flag.BoolVar(&zaiLogin, "zai-login", false, "Login to Z.AI / ZCode coding plan using OAuth")
-	flag.StringVar(&zaiProvider, "zai-provider", "zai", "Identity provider for -zai-login: zai (international) or bigmodel (China mainland)")
 	flag.BoolVar(&devinLogin, "devin-login", false, "Login to Devin using OAuth")
 	flag.BoolVar(&metaLogin, "meta-login", false, "Login to Meta using OAuth")
 	flag.BoolVar(&discoverGateways, "discover", false, "Discover local AI gateways and CPA instances on the LAN")
@@ -656,7 +652,7 @@ func main() {
 		CallbackPort: oauthCallbackPort,
 	}
 
-	commandMode := vertexImport != "" || antigravityLogin || codexLogin || codexDeviceLogin || claudeLogin || kimiLogin || kimiAILogin || zaiLogin || xaiLogin || devinLogin || metaLogin
+	commandMode := vertexImport != "" || antigravityLogin || codexLogin || codexDeviceLogin || claudeLogin || kimiLogin || kimiAILogin || xaiLogin || devinLogin || metaLogin
 	cloudConfigMissing := isCloudDeploy && !configFileExists
 	homeMode := configLoadedFromHome || (cfg != nil && cfg.Home.Enabled)
 	exampleAPIKeySafeMode := shouldEnableExampleAPIKeySafeMode(cfg, commandMode, tuiMode, standalone, cloudConfigMissing, homeMode)
@@ -732,8 +728,6 @@ func main() {
 		cmd.DoKimiAILogin(cfg, options)
 	} else if xaiLogin {
 		cmd.DoXAILogin(cfg, options)
-	} else if zaiLogin {
-		cmd.DoZAILogin(cfg, options, zaiProvider)
 	} else if devinLogin {
 		cmd.DoDevinLogin(cfg, options)
 	} else if metaLogin {

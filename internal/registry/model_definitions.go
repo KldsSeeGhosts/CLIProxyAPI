@@ -33,7 +33,6 @@ type staticModelsJSON struct {
 	Kimi        []*ModelInfo `json:"kimi"`
 	Antigravity []*ModelInfo `json:"antigravity"`
 	XAI         []*ModelInfo `json:"xai"`
-	ZAI         []*ModelInfo `json:"zai"`
 	Devin       []*ModelInfo `json:"devin"`
 	Meta        []*ModelInfo `json:"meta"`
 }
@@ -240,11 +239,6 @@ func AntigravityWebSearchModelFor(modelID string) string {
 // GetXAIModels returns the standard xAI Grok model definitions.
 func GetXAIModels() []*ModelInfo {
 	return WithXAIBuiltins(cloneModelInfos(getModels().XAI))
-}
-
-// GetZAIModels returns the Z.AI / ZCode (GLM) coding-plan model definitions.
-func GetZAIModels() []*ModelInfo {
-	return cloneModelInfos(getModels().ZAI)
 }
 
 // WithCodexBuiltins injects hard-coded Codex-only model definitions that should
@@ -539,8 +533,6 @@ func GetStaticModelDefinitionsByChannel(channel string) []*ModelInfo {
 		return GetAntigravityModels()
 	case "xai", "x-ai", "grok":
 		return GetXAIModels()
-	case "zai", "z-ai", "glm", "zhipu", "bigmodel":
-		return GetZAIModels()
 	case "devin":
 		return GetDevinModels()
 	case "meta", "muse":
@@ -587,7 +579,6 @@ func LookupStaticModelInfo(modelID string) *ModelInfo {
 		data.Kimi,
 		data.Antigravity,
 		data.XAI,
-		data.ZAI,
 		data.Devin,
 		staticDevinModels,
 		data.Meta,

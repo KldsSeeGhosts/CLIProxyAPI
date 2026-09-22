@@ -65,10 +65,6 @@ func (h *Handler) handleOAuthCallback(c *gin.Context, req oauthCallbackRequest) 
 		if code == "" {
 			code = strings.TrimSpace(q.Get("code"))
 		}
-		if code == "" {
-			// BigModel returns the authorization code as "authCode".
-			code = strings.TrimSpace(q.Get("authCode"))
-		}
 		if errMsg == "" {
 			errMsg = strings.TrimSpace(q.Get("error"))
 			if errMsg == "" {

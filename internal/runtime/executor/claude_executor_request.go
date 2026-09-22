@@ -1245,24 +1245,10 @@ func applyClaudeHeadersWithNativeProfile(
 // call. Folding the wire-casing pass in here makes it structurally impossible
 // for one of the three request paths to drift away from the others, which is
 // exactly how the streaming and non-streaming beta sets diverged before.
-// The ZCode harness profile (zai credentials) is applied here too, after all
-// Claude header assembly, so it owns the final wire shape.
 func doClaudeUpstreamRequest(client *http.Client, req *http.Request) (*http.Response, error) {
 	applyClaudeWireHeaderCasing(req)
-	zcodeFinalizeUpstreamRequest(req, zcodeAuthFromRequestContext(req))
 	cliproxyexecutor.MarkUpstreamAttempt(req.Context())
 	return client.Do(req)
-}
-
-// zcodeAuthFromRequestContext retrieves the auth selected for this upstream
-// attempt, attached by the executor paths for the ZCode finalize hook. It is
-// only present for zai credentials (ZAIExecutor attaches its cloned auth).
-func zcodeAuthFromRequestContext(req *http.Request) *cliproxyauth.Auth {
-	if req == nil || req.Context() == nil {
-		return nil
-	}
-	auth, _ := req.Context().Value(zcodeRequestAuthContextKey{}).(*cliproxyauth.Auth)
-	return auth
 }
 
 // claudeWireHeaderCasing maps Go's canonical header name to the exact casing

@@ -90,7 +90,6 @@ func TestRegisterAvailableExecutors(t *testing.T) {
 		"kimi-ai",
 		"kimi.ai",
 		"xai",
-		"zai",
 		"openai-compatibility",
 		"plugin-provider",
 	}
@@ -130,23 +129,6 @@ func TestSyncPluginModelRuntimePreservesSDKExecutorUnlessForced(t *testing.T) {
 	}
 	if _, replaced := got.(*runtimeexecutor.OpenAICompatExecutor); !replaced {
 		t.Fatalf("forced registration kept %T, want *executor.OpenAICompatExecutor", got)
-	}
-}
-
-func TestRegisterExecutorForAuth_ZAIUsesNativeExecutor(t *testing.T) {
-	service := &Service{
-		cfg:         &config.Config{},
-		coreManager: coreauth.NewManager(nil, nil, nil),
-	}
-
-	service.registerExecutorForAuth(&coreauth.Auth{ID: "zai-test", Provider: "zai"}, false)
-
-	resolved, ok := service.coreManager.Executor("zai")
-	if !ok {
-		t.Fatal("expected native zai executor")
-	}
-	if _, isZAI := resolved.(*runtimeexecutor.ZAIExecutor); !isZAI {
-		t.Fatalf("executor type = %T, want *executor.ZAIExecutor", resolved)
 	}
 }
 
