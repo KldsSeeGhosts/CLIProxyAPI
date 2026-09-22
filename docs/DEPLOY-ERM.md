@@ -99,7 +99,7 @@ grep "CLIProxyAPI Version" ~/.cli-proxy-api/logs/main.log | tail -1
 Then run the inference canaries (expects HTTP 200 + echo from each):
 
 ```bash
-python3 /tmp/cpa_infer_test.py gpt-6-sol gpt-6-luna gpt-6-astra zai/glm-5.3-flash
+~/.local/bin/cpa-canary          # or: cpa-canary gpt-6-sol gpt-6-luna gpt-6-astra zai/glm-5.3-flash
 ```
 
 (`gpt-6-*` exercises the Codex route + the auth-file `Version` header
