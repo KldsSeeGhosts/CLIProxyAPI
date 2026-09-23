@@ -11,6 +11,8 @@ import (
 	"strings"
 	"sync"
 
+	"github.com/tidwall/gjson"
+
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/registry"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/runtime/executor/helps"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/thinking"
@@ -541,9 +543,103 @@ func (a *executorAdapter) translateExecutorResponse(ctx context.Context, prepare
 		}
 		return bytes.Join(frames, nil)
 	}
+	payload = normalizeClaudePluginPayload(payload)
 	out := sdktranslator.TranslateNonStream(ctx, prepared.outputFormat, prepared.requestedFormat, prepared.req.Model, originalRequest, prepared.req.Payload, payload, param)
 	if prepared.requestedFormat == sdktranslator.FormatOpenAIResponse {
 		out = helps.EnsureResponsesUsageDetails(out)
+	}
+	return out
+}
+
+var claudeSSEDataTag = []byte("data: ")
+
+// normalizeClaudePluginPayload converts a plain non-stream Anthropic message
+// JSON returned by a claude-format plugin executor into the SSE event
+// sequence the claude->X response converters consume. The native
+// ClaudeExecutor streams upstream whenever the client format differs, so its
+// payloads always arrive as events; plugin executors legitimately answer
+// non-stream upstream calls with the message JSON, and the converters would
+// otherwise see zero "data:" chunks and emit an empty shell response.
+func normalizeClaudePluginPayload(payload []byte) []byte {
+	if len(payload) == 0 || bytes.Contains(payload, claudeSSEDataTag) {
+		return payload
+	}
+	root := gjson.GetBytes(payload, "type")
+	if root.String() != "message" {
+		return payload
+	}
+	var b bytes.Buffer
+	writeEvent := func(v any) {
+		encoded, err := json.Marshal(v)
+		if err != nil {
+			return
+		}
+		b.WriteString("data: ")
+		b.Write(encoded)
+		b.WriteString("\n\n")
+	}
+	messageStart := gjson.ParseBytes(payload)
+	messageStart.ForEach(func(key, value gjson.Result) bool {
+		switch key.String() {
+		case "content", "stop_reason", "stop_sequence":
+			return true
+		}
+		return true
+	})
+	// message_start carries identity + input usage; strip content/stop fields.
+	start := map[string]any{"type": "message_start", "message": map[string]any{}}
+	if v := gjson.GetBytes(payload, "id"); v.Exists() {
+		start["message"].(map[string]any)["id"] = v.String()
+	}
+	if v := gjson.GetBytes(payload, "model"); v.Exists() {
+		start["message"].(map[string]any)["model"] = v.String()
+	}
+	if v := gjson.GetBytes(payload, "role"); v.Exists() {
+		start["message"].(map[string]any)["role"] = v.String()
+	}
+	msgType := map[string]any{"type": "message", "content": []any{}, "usage": map[string]any{}}
+	if v := gjson.GetBytes(payload, "usage.input_tokens"); v.Exists() {
+		msgType["usage"].(map[string]any)["input_tokens"] = v.Int()
+	}
+	start["message"].(map[string]any)["type"] = "message"
+	start["message"].(map[string]any)["content"] = msgType["content"]
+	start["message"].(map[string]any)["usage"] = msgType["usage"]
+	writeEvent(start)
+
+	// Emit content blocks with a single full-content delta each.
+	i := 0
+	gjson.GetBytes(payload, "content").ForEach(func(_, block gjson.Result) bool {
+		blockType := block.Get("type").String()
+		blockJSON := json.RawMessage(block.Raw)
+		writeEvent(map[string]any{"type": "content_block_start", "index": i, "content_block": blockJSON})
+		switch blockType {
+		case "thinking":
+			writeEvent(map[string]any{"type": "content_block_delta", "index": i, "delta": map[string]any{"type": "thinking_delta", "thinking": block.Get("thinking").String()}})
+		case "text":
+			writeEvent(map[string]any{"type": "content_block_delta", "index": i, "delta": map[string]any{"type": "text_delta", "text": block.Get("text").String()}})
+		case "tool_use":
+			writeEvent(map[string]any{"type": "content_block_delta", "index": i, "delta": map[string]any{"type": "input_json_delta", "partial_json": block.Get("input").Raw}})
+		}
+		writeEvent(map[string]any{"type": "content_block_stop", "index": i})
+		i++
+		return true
+	})
+
+	delta := map[string]any{"type": "message_delta", "delta": map[string]any{}, "usage": map[string]any{}}
+	if v := gjson.GetBytes(payload, "stop_reason"); v.Exists() {
+		delta["delta"].(map[string]any)["stop_reason"] = v.String()
+	}
+	if v := gjson.GetBytes(payload, "stop_sequence"); v.Exists() {
+		delta["delta"].(map[string]any)["stop_sequence"] = v.Value()
+	}
+	if v := gjson.GetBytes(payload, "usage.output_tokens"); v.Exists() {
+		delta["usage"].(map[string]any)["output_tokens"] = v.Int()
+	}
+	writeEvent(delta)
+	writeEvent(map[string]any{"type": "message_stop"})
+	out := b.Bytes()
+	if len(out) == 0 {
+		return payload
 	}
 	return out
 }
