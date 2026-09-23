@@ -35,13 +35,42 @@ remove it.)
 ```bash
 cd ~/Projects/CLIProxyAPI
 tools/build-erm.sh              # outputs to /tmp/cpa-build by default
-# or: tools/build-erm.sh /tmp/cpa-build
+# or: tools/build-erm.sh /tmp/cpa-build --plugins
 ```
 
 The script enforces the runbook rules: refuses tracked modifications and
 untracked `*.go` files (they would be compiled in and make the build
-irreproducible from GitHub), forces `CGO_ENABLED=0 GOAMD64=v1`, and stamps
+irreproducible from GitHub), forces `GOAMD64=v1`, and stamps
 `Version`/`Commit`/`BuildDate` from git.
+
+### Two build modes
+
+- **Default (static, no plugins):** `CGO_ENABLED=0`. Use only while the
+  deployment runs zero dlopen plugins.
+- **`--plugins` (cgo host):** the binary must be built `CGO_ENABLED=1` —
+  dynamic-library plugin loading (dlopen) is compiled out otherwise and the
+  host logs `standard dynamic library plugin loading requires cgo on this
+  platform` for every `.so` in `plugins/`. A plain cgo build on CachyOS is
+  NOT deployable: the linker merges x86-64-v4 ISA notes from the distro's
+  crt objects and the i7-8750H server rejects the binary (the isa-safety
+  net then silently reverts). The `--plugins` mode therefore compiles with
+  zig as the C toolchain:
+
+  ```
+  CC="zig cc -target x86_64-linux-gnu.2.34" CGO_ENABLED=1 GOAMD64=v1
+  ```
+
+  which produces a binary with **no ISA notes** and glibc symbol
+  requirements capped at GLIBC_2.34 (server glibc 2.44 satisfies this).
+  Verified in production 2026-09-22 (`v7.3.14-20-g2d9245e9` + cpa-zai-plugin).
+  The plugin `.so` itself is built separately (repo: `KldsSeeGhosts/cpa-zai-plugin`,
+  its `build.sh` does the same GOAMD64=v1 + readelf ISA verification) and is
+  deployed to `~/cliproxyapi/plugins/zai.so` — the host derives the plugin id
+  from the filename, so the file MUST be named `zai.so` to match
+  `plugins.configs.zai`.
+
+The `cpa-responses-shim` is stdlib-only and always builds `CGO_ENABLED=0`
+in both modes.
 
 Equivalent manual invocation:
 

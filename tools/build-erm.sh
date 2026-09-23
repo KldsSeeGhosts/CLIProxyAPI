@@ -27,18 +27,49 @@ if ! command -v "$GO_BIN" >/dev/null 2>&1; then
     exit 1
 fi
 
-export CGO_ENABLED=0 GOAMD64=v1
+PLUGINS=0
+for arg in "$@"; do
+    case "$arg" in
+        --plugins) PLUGINS=1 ;;
+        -*|/*) ;; # ignore the output-dir positional
+        *) OUT_DIR="$arg" ;;
+    esac
+done
+OUT="${OUT_DIR:-/tmp/cpa-build}"
+
+export GOAMD64=v1
+if [ "$PLUGINS" -eq 1 ]; then
+    # dlopen plugins require cgo; plain CachyOS cgo stamps x86-64-v4 ISA
+    # notes the server CPU rejects, so compile with zig's baseline toolchain
+    # (no ISA notes, glibc symbols capped at 2.34). See docs/DEPLOY-ERM.md.
+    if ! command -v zig >/dev/null 2>&1; then
+        echo "ERROR: --plugins requires zig (not found in PATH)" >&2
+        exit 1
+    fi
+    export CGO_ENABLED=1
+    export CC="zig cc -target x86_64-linux-gnu.2.34"
+    export CXX="zig c++ -target x86_64-linux-gnu.2.34"
+else
+    export CGO_ENABLED=0
+fi
 VERSION="$(git describe --tags --always)"
 COMMIT="$(git rev-parse --short HEAD)"
 BUILD_DATE="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
-OUT="${1:-/tmp/cpa-build}"
 mkdir -p "$OUT"
 
-echo "==> $VERSION (commit $COMMIT) -> $OUT (CGO_ENABLED=0, GOAMD64=v1)"
+echo "==> $VERSION (commit $COMMIT) -> $OUT (CGO_ENABLED=$CGO_ENABLED, GOAMD64=v1, plugins=$PLUGINS)"
 
 "$GO_BIN" build -trimpath -ldflags "-s -w \
   -X main.Version=${VERSION} -X main.Commit=${COMMIT} -X main.BuildDate=${BUILD_DATE}" \
   -o "$OUT/cli-proxy-api" ./cmd/server
+
+if [ "$PLUGINS" -eq 1 ]; then
+    ISA=$(readelf --notes "$OUT/cli-proxy-api" 2>/dev/null | grep -i "x86 ISA needed" || true)
+    if [ -n "$ISA" ]; then
+        echo "ERROR: binary carries ISA notes the server rejects: $ISA" >&2
+        exit 1
+    fi
+fi
 
 "$GO_BIN" build -trimpath -ldflags "-s -w" \
   -o "$OUT/cpa-responses-shim" ./tools/cpa-responses-shim
