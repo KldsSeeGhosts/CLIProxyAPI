@@ -1,17 +1,23 @@
 // Command cpa-responses-shim keeps a custom CLIProxyAPI binary in place while
-// normalizing the request shapes that strict third-party upstreams reject:
+// normalizing the request shapes that strict third-party upstreams reject.
+// Every transform is scoped to both the client wire format (request path) and
+// the target model, so one harness's fix can never reshape another harness's
+// payload:
 //
-//   - OpenCode Go does not understand Codex Desktop's additional_tools input
-//     item or namespace declarations.
-//   - OpenCode Go (Zen endpoint, e.g. omen-alpha) rejects the OpenAI
-//     "developer" message role with "[1214] Incorrect role information";
-//     developer messages are remapped to "system", which it accepts.
-//   - Older Gemini executors can replay stale/foreign encrypted_content fields
-//     and receive "Invalid thought signature" from the upstream API.
+//   - Responses (Codex): OpenCode Go does not understand Codex Desktop's
+//     additional_tools input item, namespace declarations, or custom tools.
+//     They are flattened to plain function tools and restored on the way back.
+//   - Chat completions (Pi, OpenCode): the OpenCode Zen endpoint rejects the
+//     "developer" role with "[1214] Incorrect role information"; it is
+//     remapped to "system".
+//   - Messages (Claude Code): OpenCode Go rejects Claude Code's map-shaped
+//     context_management with "expected a sequence"; it is dropped.
+//   - All wires: some OpenCode Go models reject tools without a description
+//     ("function.description is required"); the tool name is filled in.
+//   - Gemini: stale or foreign replay signatures in conversation history are
+//     removed ("Invalid thought signature"). Tool schemas are never touched.
 //
-// The shim normalizes selected provider requests and restores Muse Responses
-// tool identities on the return path. Other responses and WebSocket traffic
-// are forwarded unchanged to the configured backend.
+// Other requests, responses and WebSocket traffic are forwarded unchanged.
 package main
 
 import (
@@ -147,14 +153,31 @@ func run(opts options) error {
 	}
 }
 
-func shouldRewrite(r *http.Request) bool {
-	if r == nil || r.Method != http.MethodPost {
-		return false
+// wire identifies the client API format of a request.
+type wire int
+
+const (
+	wireNone wire = iota
+	wireResponses
+	wireMessages
+	wireChat
+)
+
+func wireForPath(path string) wire {
+	switch strings.TrimSuffix(strings.TrimSpace(path), "/") {
+	case "/v1/responses", "/responses":
+		return wireResponses
+	case "/v1/messages", "/messages":
+		return wireMessages
+	case "/v1/chat/completions", "/chat/completions":
+		return wireChat
+	default:
+		return wireNone
 	}
-	path := strings.TrimSuffix(strings.TrimSpace(r.URL.Path), "/")
-	return path == "/v1/responses" || path == "/responses" ||
-		path == "/v1/messages" || path == "/messages" ||
-		path == "/v1/chat/completions" || path == "/chat/completions"
+}
+
+func shouldRewrite(r *http.Request) bool {
+	return r != nil && r.Method == http.MethodPost && wireForPath(r.URL.Path) != wireNone
 }
 
 func rewriteResponsesRequest(r *http.Request) error {
@@ -168,14 +191,15 @@ func rewriteResponsesRequest(r *http.Request) error {
 	if int64(len(body)) > maxBodyBytes {
 		return errBodyTooLarge
 	}
-	if isResponsesPath(r.URL.Path) {
+	wire := wireForPath(r.URL.Path)
+	if wire == wireResponses {
 		var original map[string]any
-		if json.Unmarshal(body, &original) == nil && isMuseModel(stringValue(original["model"])) {
+		if json.Unmarshal(body, &original) == nil && isOpenCodeModel(stringValue(original["model"])) {
 			identities := museToolIdentities(original)
 			*r = *r.WithContext(context.WithValue(r.Context(), museIdentityKey{}, identities))
 		}
 	}
-	rewritten, changed, err := rewriteResponseJSON(body)
+	rewritten, changed, err := rewriteRequestJSON(wire, body)
 	if err != nil {
 		return fmt.Errorf("decode request body: %w", err)
 	}
@@ -192,14 +216,9 @@ func rewriteResponsesRequest(r *http.Request) error {
 	return nil
 }
 
-func isResponsesPath(path string) bool {
-	trimmed := strings.TrimSuffix(strings.TrimSpace(path), "/")
-	return trimmed == "/v1/responses" || trimmed == "/responses"
-}
-
-// rewriteResponseJSON rewrites only the request models that need compatibility
-// help. The bool reports whether the serialized payload changed.
-func rewriteResponseJSON(body []byte) ([]byte, bool, error) {
+// rewriteRequestJSON rewrites only the (wire, model) combinations that need
+// compatibility help. The bool reports whether the serialized payload changed.
+func rewriteRequestJSON(w wire, body []byte) ([]byte, bool, error) {
 	if !json.Valid(body) {
 		return nil, false, errors.New("request body is not valid JSON")
 	}
@@ -210,20 +229,22 @@ func rewriteResponseJSON(body []byte) ([]byte, bool, error) {
 	if err := decoder.Decode(&root); err != nil {
 		return nil, false, err
 	}
-	model, _ := root["model"].(string)
-	model = strings.TrimSpace(model)
+	model := strings.TrimSpace(stringValue(root["model"]))
 
 	changed := false
 	if isGeminiModel(model) {
 		changed = sanitizeGeminiReplay(root) || changed
 	}
-	if isMuseModel(model) {
+	if isOpenCodeModel(model) {
+		switch w {
+		case wireResponses:
+			changed = flattenMuseReplay(root, museToolIdentities(root)) || changed
+			changed = flattenMuseTools(root) || changed
+		case wireChat:
+			changed = normalizeOpenCodeChatRoles(root) || changed
+		}
 		changed = sanitizeMuseContextManagement(root) || changed
-		changed = flattenMuseReplay(root, museToolIdentities(root)) || changed
-		changed = flattenMuseTools(root) || changed
-	}
-	if isOpenCodeGoChatModel(model) {
-		changed = normalizeOpenCodeChatRoles(root) || changed
+		changed = fillToolDescriptions(w, root) || changed
 	}
 	if !changed {
 		return body, false, nil
@@ -240,16 +261,67 @@ func isGeminiModel(model string) bool {
 	return strings.HasPrefix(model, "gemini-3.8-flash")
 }
 
-func isMuseModel(model string) bool {
-	model = strings.ToLower(strings.TrimSpace(model))
-	return strings.Contains(model, "muse-spark") ||
-		strings.Contains(model, "opencode-go") ||
-		strings.Contains(model, "opencode")
+// openCodeBareAliases are unprefixed config aliases routed to OpenCode Go.
+var openCodeBareAliases = map[string]struct{}{
+	"omen-alpha":          {},
+	"deepseek-flash":      {},
+	"deepseek-v4.1-flash": {},
 }
 
-func isOpenCodeGoChatModel(model string) bool {
+// isOpenCodeModel reports whether a model routes to the OpenCode Go (Zen)
+// upstream. Cursor-hosted models that merely share a family name (for example
+// cursor/muse-spark-1.3-high) go through the Cursor plugin and are excluded.
+func isOpenCodeModel(model string) bool {
 	model = strings.ToLower(strings.TrimSpace(model))
-	return strings.Contains(model, "opencode") || strings.Contains(model, "omen")
+	if model == "" || strings.HasPrefix(model, "cursor/") {
+		return false
+	}
+	if strings.HasPrefix(model, "opencode-go/") || strings.HasPrefix(model, "opencode/") {
+		return true
+	}
+	if strings.Contains(model, "muse-spark") {
+		return true
+	}
+	_, ok := openCodeBareAliases[model]
+	return ok
+}
+
+// fillToolDescriptions gives every client-defined function tool a non-empty
+// description. Some OpenCode Go models reject tools without one with
+// "function.description is required". Anthropic server tools (web_search,
+// bash, text_editor, ...) carry no input_schema and are left alone.
+func fillToolDescriptions(w wire, root map[string]any) bool {
+	changed := false
+	for _, value := range rawToolSlice(root["tools"]) {
+		tool, ok := value.(map[string]any)
+		if !ok {
+			continue
+		}
+		target := tool
+		switch w {
+		case wireChat:
+			function, ok := tool["function"].(map[string]any)
+			if !ok {
+				continue
+			}
+			target = function
+		case wireMessages:
+			if _, ok := tool["input_schema"]; !ok {
+				continue
+			}
+		case wireResponses:
+			if kind := stringValue(tool["type"]); kind != "" && kind != "function" {
+				continue
+			}
+		}
+		name := strings.TrimSpace(stringValue(target["name"]))
+		if name == "" || strings.TrimSpace(stringValue(target["description"])) != "" {
+			continue
+		}
+		target["description"] = name
+		changed = true
+	}
+	return changed
 }
 
 // normalizeOpenCodeChatRoles remaps the OpenAI "developer" message role to
@@ -291,7 +363,9 @@ func sanitizeMuseContextManagement(root map[string]any) bool {
 
 // Keep CPA's typed Gemini carriers on top-level reasoning items. The backend
 // validates their envelope, provider, and semantic target before replay. Raw
-// foreign signatures still pass through the legacy sanitizer.
+// foreign signatures in conversation history (Responses input, Messages or
+// Chat messages) are removed. Tool schemas and other request fields are never
+// touched: a tool parameter may legitimately be named encrypted_content.
 func sanitizeGeminiReplay(root map[string]any) bool {
 	type carrier struct {
 		item  map[string]any
@@ -310,7 +384,12 @@ func sanitizeGeminiReplay(root map[string]any) bool {
 			}
 		}
 	}
-	changed := stripGeminiReplayFields(root)
+	changed := false
+	for _, key := range []string{"input", "messages"} {
+		if history, ok := root[key].([]any); ok && stripGeminiReplayFields(history) {
+			changed = true
+		}
+	}
 	for _, saved := range preserved {
 		saved.item["encrypted_content"] = saved.value
 	}

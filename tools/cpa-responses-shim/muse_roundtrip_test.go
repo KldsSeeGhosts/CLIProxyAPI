@@ -15,7 +15,7 @@ const museDeclarations = `{"model":"opencode-go/muse-spark-1.3-contributor","inp
 func TestMuseToolRoundTrip(t *testing.T) {
 	root := decodeTestJSON(t, []byte(museDeclarations))
 	ids := museToolIdentities(root)
-	out, changed, err := rewriteResponseJSON([]byte(museDeclarations))
+	out, changed, err := rewriteRequestJSON(wireResponses, []byte(museDeclarations))
 	if err != nil || !changed {
 		t.Fatalf("rewrite = %t %v", changed, err)
 	}

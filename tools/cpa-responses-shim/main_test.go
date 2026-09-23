@@ -16,7 +16,7 @@ func decodeTestJSON(t *testing.T, raw []byte) map[string]any {
 	return out
 }
 
-func TestRewriteResponseJSONStripsGeminiReplayFields(t *testing.T) {
+func TestRewriteRequestJSONStripsGeminiReplayFields(t *testing.T) {
 	input := []byte(`{
 		"model":"gemini-3.8-flash",
 		"input":[
@@ -27,12 +27,12 @@ func TestRewriteResponseJSONStripsGeminiReplayFields(t *testing.T) {
 		"metadata":{"encrypted_content":"nested-stale"}
 	}`)
 
-	out, changed, err := rewriteResponseJSON(input)
+	out, changed, err := rewriteRequestJSON(wireResponses, input)
 	if err != nil {
-		t.Fatalf("rewriteResponseJSON() error = %v", err)
+		t.Fatalf("rewriteRequestJSON() error = %v", err)
 	}
 	if !changed {
-		t.Fatal("rewriteResponseJSON() changed = false, want true")
+		t.Fatal("rewriteRequestJSON() changed = false, want true")
 	}
 	root := decodeTestJSON(t, out)
 	items := root["input"].([]any)
@@ -48,12 +48,12 @@ func TestRewriteResponseJSONStripsGeminiReplayFields(t *testing.T) {
 		t.Fatal("thoughtSignature was not removed")
 	}
 	meta := root["metadata"].(map[string]any)
-	if _, ok := meta["encrypted_content"]; ok {
-		t.Fatal("nested encrypted_content was not removed")
+	if meta["encrypted_content"] != "nested-stale" {
+		t.Fatal("non-history encrypted_content was removed")
 	}
 }
 
-func TestRewriteResponseJSONFlattensMuseAdditionalTools(t *testing.T) {
+func TestRewriteRequestJSONFlattensMuseAdditionalTools(t *testing.T) {
 	input := []byte(`{
 		"model":"opencode-go/muse-spark-1.2-contributor",
 		"input":[
@@ -74,12 +74,12 @@ func TestRewriteResponseJSONFlattensMuseAdditionalTools(t *testing.T) {
 		"tool_choice":"auto"
 	}`)
 
-	out, changed, err := rewriteResponseJSON(input)
+	out, changed, err := rewriteRequestJSON(wireResponses, input)
 	if err != nil {
-		t.Fatalf("rewriteResponseJSON() error = %v", err)
+		t.Fatalf("rewriteRequestJSON() error = %v", err)
 	}
 	if !changed {
-		t.Fatal("rewriteResponseJSON() changed = false, want true")
+		t.Fatal("rewriteRequestJSON() changed = false, want true")
 	}
 	root := decodeTestJSON(t, out)
 	items := root["input"].([]any)
@@ -103,27 +103,27 @@ func TestRewriteResponseJSONFlattensMuseAdditionalTools(t *testing.T) {
 	}
 }
 
-func TestRewriteResponseJSONLeavesOtherModelsUntouched(t *testing.T) {
+func TestRewriteRequestJSONLeavesOtherModelsUntouched(t *testing.T) {
 	input := []byte(`{"model":"gpt-5.6-sol","input":[{"type":"additional_tools","tools":[]}]}`)
-	out, changed, err := rewriteResponseJSON(input)
+	out, changed, err := rewriteRequestJSON(wireResponses, input)
 	if err != nil {
-		t.Fatalf("rewriteResponseJSON() error = %v", err)
+		t.Fatalf("rewriteRequestJSON() error = %v", err)
 	}
 	if changed {
-		t.Fatal("rewriteResponseJSON() changed a non-target model")
+		t.Fatal("rewriteRequestJSON() changed a non-target model")
 	}
 	if string(out) != string(input) {
 		t.Fatalf("non-target payload changed: %s", out)
 	}
 }
 
-func TestRewriteResponseJSONRejectsInvalidJSON(t *testing.T) {
-	if _, _, err := rewriteResponseJSON([]byte(`{"model":`)); err == nil {
-		t.Fatal("rewriteResponseJSON() error = nil, want invalid JSON error")
+func TestRewriteRequestJSONRejectsInvalidJSON(t *testing.T) {
+	if _, _, err := rewriteRequestJSON(wireResponses, []byte(`{"model":`)); err == nil {
+		t.Fatal("rewriteRequestJSON() error = nil, want invalid JSON error")
 	}
 }
 
-func TestRewriteResponseJSONRemapsDeveloperRoleForOmenAlpha(t *testing.T) {
+func TestRewriteRequestJSONRemapsDeveloperRoleForOmenAlpha(t *testing.T) {
 	input := []byte(`{
 		"model":"opencode-go/omen-alpha",
 		"messages":[
@@ -133,12 +133,12 @@ func TestRewriteResponseJSONRemapsDeveloperRoleForOmenAlpha(t *testing.T) {
 		]
 	}`)
 
-	out, changed, err := rewriteResponseJSON(input)
+	out, changed, err := rewriteRequestJSON(wireChat, input)
 	if err != nil {
-		t.Fatalf("rewriteResponseJSON() error = %v", err)
+		t.Fatalf("rewriteRequestJSON() error = %v", err)
 	}
 	if !changed {
-		t.Fatal("rewriteResponseJSON() changed = false, want true")
+		t.Fatal("rewriteRequestJSON() changed = false, want true")
 	}
 	root := decodeTestJSON(t, out)
 	messages := root["messages"].([]any)
@@ -153,14 +153,14 @@ func TestRewriteResponseJSONRemapsDeveloperRoleForOmenAlpha(t *testing.T) {
 	}
 }
 
-func TestRewriteResponseJSONLeavesOtherChatModelsUntouched(t *testing.T) {
+func TestRewriteRequestJSONLeavesOtherChatModelsUntouched(t *testing.T) {
 	input := []byte(`{"model":"gpt-5.6-sol","messages":[{"role":"developer","content":"sys"}]}`)
-	out, changed, err := rewriteResponseJSON(input)
+	out, changed, err := rewriteRequestJSON(wireChat, input)
 	if err != nil {
-		t.Fatalf("rewriteResponseJSON() error = %v", err)
+		t.Fatalf("rewriteRequestJSON() error = %v", err)
 	}
 	if changed {
-		t.Fatal("rewriteResponseJSON() changed a non-OpenCode model")
+		t.Fatal("rewriteRequestJSON() changed a non-OpenCode model")
 	}
 	if string(out) != string(input) {
 		t.Fatalf("non-target payload changed: %s", out)

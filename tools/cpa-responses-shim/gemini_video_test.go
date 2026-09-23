@@ -15,7 +15,7 @@ func TestGeminiVideoSurvivesShimAndTranslator(t *testing.T) {
 			{"type":"function_call_output","call_id":"v1","output":"Prepared video"},
 			{"role":"user","content":[{"type":"input_video","video_url":` + videoURL + `,"video_metadata":{"fps":2,"startOffset":"1s","endOffset":"3s"}}]}
 		]}`)
-		rewritten, _, err := rewriteResponseJSON(body)
+		rewritten, _, err := rewriteRequestJSON(wireResponses, body)
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -53,7 +53,7 @@ func TestGeminiShimPreservesOnlyTypedReasoningCarriers(t *testing.T) {
 		{"type":"function_call_output","output":{"type":"reasoning","encrypted_content":"cpa-gemini-responses-carrier-v1:next:function:QUJD"}},
 		{"type":"function_call","thoughtSignature":"foreign-signature"}
 	]}`)
-	out, changed, err := rewriteResponseJSON(body)
+	out, changed, err := rewriteRequestJSON(wireResponses, body)
 	if err != nil || !changed {
 		t.Fatalf("rewrite failed: changed=%v error=%v", changed, err)
 	}
