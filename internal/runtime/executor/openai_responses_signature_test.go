@@ -2,6 +2,7 @@ package executor
 
 import (
 	"context"
+	"fmt"
 	"encoding/base64"
 	"strings"
 	"testing"
@@ -191,6 +192,30 @@ func TestSanitizeOpenAIResponsesReasoningEncryptedContentWithCompat_PreservesRea
 	}
 	if reasoningItem.Get("encrypted_content").Exists() {
 		t.Fatalf("null encrypted_content should still be stripped: %s", got)
+	}
+}
+
+func TestSanitizeOpenAIResponsesReasoningEncryptedContentWithCompat_PreservesNonGPTEncryptedContent(t *testing.T) {
+	const nonGPTSignature = "Q-PaDgH_test123_opencode_signature"
+	body := []byte(`{"store":false,"input":[` +
+		`{"id":"rs_compat","type":"reasoning","summary":[],"encrypted_content":` + fmt.Sprintf("%q", nonGPTSignature) + `},` +
+		`{"id":"msg_1","type":"message","role":"user","content":[{"type":"input_text","text":"hi"}]}` +
+		`]}`)
+
+	// With isCompat=false, non-GPT signature must be rejected and stripped.
+	incompatible := sanitizeOpenAIResponsesReasoningEncryptedContentWithCompat(context.Background(), "test", body, false)
+	if gjson.GetBytes(incompatible, "input.0.encrypted_content").Exists() {
+		t.Fatalf("expected non-GPT signature to be stripped when isCompat=false: %s", incompatible)
+	}
+
+	// With isCompat=true, third-party encrypted_content must be preserved intact.
+	compatible := sanitizeOpenAIResponsesReasoningEncryptedContentWithCompat(context.Background(), "test", body, true)
+	reasoningItem := gjson.GetBytes(compatible, "input.0")
+	if gotID := reasoningItem.Get("id").String(); gotID != "rs_compat" {
+		t.Fatalf("reasoning id = %q, want rs_compat; body=%s", gotID, compatible)
+	}
+	if gotSig := reasoningItem.Get("encrypted_content").String(); gotSig != nonGPTSignature {
+		t.Fatalf("reasoning encrypted_content = %q, want %q; body=%s", gotSig, nonGPTSignature, compatible)
 	}
 }
 

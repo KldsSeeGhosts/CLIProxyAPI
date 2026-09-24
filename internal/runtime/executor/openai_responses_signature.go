@@ -167,8 +167,10 @@ func sanitizeOpenAIResponsesReasoningEncryptedContentWithCompat(ctx context.Cont
 			rawSignature := encryptedContent.String()
 			if rawSignature != strings.TrimSpace(rawSignature) {
 				reason = "encrypted_content has leading or trailing whitespace"
-			} else if _, err := signature.InspectGPTReasoningSignature(rawSignature); err != nil {
-				reason = err.Error()
+			} else if !isCompat {
+				if _, err := signature.InspectGPTReasoningSignature(rawSignature); err != nil {
+					reason = err.Error()
+				}
 			}
 		case gjson.Null:
 			reason = "encrypted_content is null"
