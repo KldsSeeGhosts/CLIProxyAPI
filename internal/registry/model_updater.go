@@ -126,6 +126,8 @@ func tryRefreshModels(ctx context.Context, label string) {
 		parsed.Meta = oldData.Meta
 	}
 
+	preserveEmbeddedClaudeModels(parsed)
+
 	// Detect changes before updating store.
 	changed := detectChangedProviders(oldData, parsed)
 
@@ -384,4 +386,34 @@ func validateModelSection(section string, models []*ModelInfo) error {
 		seen[modelID] = struct{}{}
 	}
 	return nil
+}
+
+// preserveEmbeddedClaudeModels appends embedded Claude models that the remote
+// catalog does not list yet. A remote refresh otherwise replaces the whole
+// catalog, which drops models this fork registered ahead of upstream (a new
+// Claude release is routable here before router-for-me/models adds it). Once
+// upstream lists a model its remote entry wins, so this needs no cleanup.
+func preserveEmbeddedClaudeModels(parsed *staticModelsJSON) {
+	if parsed == nil {
+		return
+	}
+	var embedded staticModelsJSON
+	if err := json.Unmarshal(embeddedModelsJSON, &embedded); err != nil {
+		return
+	}
+	have := make(map[string]struct{}, len(parsed.Claude))
+	for _, m := range parsed.Claude {
+		if m != nil {
+			have[m.ID] = struct{}{}
+		}
+	}
+	for _, m := range embedded.Claude {
+		if m == nil {
+			continue
+		}
+		if _, ok := have[m.ID]; ok {
+			continue
+		}
+		parsed.Claude = append(parsed.Claude, cloneModelInfo(m))
+	}
 }
