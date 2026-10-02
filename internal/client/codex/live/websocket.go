@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"net"
 	"net/http"
 	"net/url"
 	"strings"
@@ -22,11 +23,19 @@ import (
 	log "github.com/sirupsen/logrus"
 )
 
-const defaultStandardRealtimeModel = "gpt-realtime"
+const (
+	defaultStandardRealtimeModel = "gpt-realtime"
+	defaultTranscriptionModel    = "gpt-transcribe"
+	transcriptionSetupTimeout    = 30 * time.Second
+)
 
 // HandleRealtimeWebsocket dispatches a standard Realtime WebSocket or an existing call sideband.
 func (h *Handler) HandleRealtimeWebsocket(c *gin.Context) {
 	if strings.TrimSpace(c.Query("call_id")) != "" {
+		if c.Request.URL.Query().Has("intent") {
+			writeRealtimeError(c, http.StatusBadRequest, "intent is not supported for a call sideband", "invalid_request_error", "invalid_realtime_intent")
+			return
+		}
 		h.HandleSideband(c)
 		return
 	}
@@ -45,12 +54,26 @@ func (h *Handler) HandleDirectWebsocket(c *gin.Context) {
 		return
 	}
 
+	transcription, errIntent := transcriptionRealtimeQuery(c.Request.URL.RawQuery)
+	if errIntent != nil {
+		writeRealtimeError(c, http.StatusBadRequest, errIntent.Error(), "invalid_request_error", "invalid_realtime_intent")
+		return
+	}
 	requestedModel := strings.TrimSpace(c.Query("model"))
 	if requestedModel == "" {
 		requestedModel = defaultStandardRealtimeModel
 	}
 	selectionModel := codexRealtimeModel(requestedModel)
+	if transcription {
+		// OAuth selection is by credential kind, not by the public model catalog.
+		// The actual transcription model is supplied in the client's session.update.
+		selectionModel = defaultTranscriptionModel
+	}
 	tokenSession := clientSecretSession(c)
+	if transcription && len(tokenSession) > 0 {
+		writeRealtimeError(c, http.StatusForbidden, "Realtime client secret does not authorize transcription", "invalid_request_error", "realtime_client_secret_scope_mismatch")
+		return
+	}
 	if len(tokenSession) > 0 {
 		tokenModel := codexRealtimeModel(modelFromJSON(tokenSession))
 		if selectionModel != tokenModel {
@@ -63,16 +86,35 @@ func (h *Handler) HandleDirectWebsocket(c *gin.Context) {
 	selectionOpts := coreexecutor.Options{Headers: liveSelectionHeaders(c)}
 	ctx = handlers.EnrichContextWithSessionHierarchy(ctx, selectionOpts.Headers, nil, nil)
 	upstreamURL := h.directRealtimeURL(requestedModel)
+	setupCtx := ctx
+	cancelSetup := func() {}
+	if transcription {
+		upstreamURL = strings.TrimRight(h.sidebandAPIBaseURL, "/") + "/realtime?intent=transcription"
+		setupCtx, cancelSetup = context.WithTimeout(ctx, transcriptionSetupTimeout)
+		defer cancelSetup()
+	}
 	helpConfig := h.currentConfig()
 	maxCredentials := directWebsocketMaxCredentials(helpConfig)
 	tried := make(map[string]struct{})
 
 	dialUpstream := func(attemptCtx context.Context, current *auth.Auth) (*websocket.Conn, *http.Response, error) {
+		if transcription {
+			// Keep Home attempt cancellation as the parent while bounding preparation
+			// and the upgrade by the shared acquisition deadline. This child context
+			// is discarded after dialing and never owns the established relay.
+			deadline, _ := setupCtx.Deadline()
+			boundedCtx, cancel := context.WithDeadline(attemptCtx, deadline)
+			defer cancel()
+			attemptCtx = boundedCtx
+		}
 		request, errRequest := http.NewRequestWithContext(attemptCtx, http.MethodGet, websocketHTTPURL(upstreamURL), nil)
 		if errRequest != nil {
 			return nil, nil, errRequest
 		}
 		request.Header = directRealtimeHeaders(c.Request.Header)
+		if transcription {
+			request.Header.Set("Originator", "jot-openai-transcribe-macos")
+		}
 		setAccountHeader(request.Header, current)
 		if errPrepare := h.authManager.PrepareHttpRequest(attemptCtx, current, request); errPrepare != nil {
 			return nil, nil, errPrepare
@@ -90,6 +132,11 @@ func (h *Handler) HandleDirectWebsocket(c *gin.Context) {
 		})
 		dialer := newProxyAwareSidebandDialer(helpConfig, current)
 		dialer.Subprotocols = websocket.Subprotocols(c.Request)
+		if transcription {
+			// Bound credential acquisition/upgrade only; the established stream has no deadline.
+			dialer.HandshakeTimeout = 15 * time.Second
+			return dialTranscriptionSetup(attemptCtx, dialer, upstreamURL, request.Header)
+		}
 		return dialer.DialContext(attemptCtx, upstreamURL, request.Header)
 	}
 
@@ -98,14 +145,23 @@ func (h *Handler) HandleDirectWebsocket(c *gin.Context) {
 	var upstream *websocket.Conn
 	var releaseAttempt func()
 	var lastFailure *liveHandshakeFailure
+	refreshedForSetup := false
 	for {
+		if transcription && setupCtx.Err() != nil {
+			writeRealtimeError(c, http.StatusGatewayTimeout, "Transcription credential setup timed out", "server_error", "realtime_setup_timeout")
+			return
+		}
 		if maxCredentials > 0 && len(tried) >= maxCredentials {
 			break
 		}
 		attemptOpts := excludedAuthIDsOption(selectionOpts, tried)
 		var errSelect error
-		selection, selected, errSelect = h.selectOAuth(ctx, selectionModel, attemptOpts)
+		selection, selected, errSelect = h.selectOAuth(setupCtx, selectionModel, attemptOpts)
 		if errSelect != nil {
+			if transcription && setupCtx.Err() != nil {
+				writeRealtimeError(c, http.StatusGatewayTimeout, "Transcription credential setup timed out", "server_error", "realtime_setup_timeout")
+				return
+			}
 			if lastFailure != nil {
 				lastFailure.write(c)
 				return
@@ -173,6 +229,21 @@ func (h *Handler) HandleDirectWebsocket(c *gin.Context) {
 			break
 		}
 		failure := newLiveHandshakeFailure(attemptCtx, helpConfig, handshakeResponse, errDial)
+		// Retry a stale local OAuth credential once, before upgrading downstream or
+		// accepting any audio. Home remains the authority for Home-owned credentials.
+		if transcription && selection == nil && failure.status == http.StatusUnauthorized && !refreshedForSetup {
+			refreshedForSetup = true
+			if refreshed, errRefresh := h.authManager.RefreshLocalAuthAfterUnauthorized(setupCtx, selected); errRefresh == nil && refreshed != nil {
+				selected = refreshed
+				conn, handshakeResponse, errDial = dialUpstream(attemptCtx, selected)
+				if errDial == nil {
+					closeHandshakeBody(handshakeResponse, "transcription retry handshake")
+					upstream = conn
+					break
+				}
+				failure = newLiveHandshakeFailure(attemptCtx, helpConfig, handshakeResponse, errDial)
+			}
+		}
 		if selection != nil && failure.status == http.StatusUnauthorized {
 			diagnosticBody := failure.body
 			if len(diagnosticBody) == 0 {
@@ -208,6 +279,9 @@ func (h *Handler) HandleDirectWebsocket(c *gin.Context) {
 		writeRealtimeError(c, http.StatusServiceUnavailable, "Codex auth unavailable", "server_error", "codex_auth_unavailable")
 		return
 	}
+	// The credential is now pinned. Cancel only the acquisition context, never
+	// impose its deadline on audio or transcript frames in the established relay.
+	cancelSetup()
 	if selection != nil {
 		selection.Retain()
 		defer releaseAttempt()
@@ -441,6 +515,26 @@ func realtimeSessionUpdate(session json.RawMessage) (json.RawMessage, error) {
 	return json.Marshal(update)
 }
 
+// transcriptionRealtimeQuery strictly separates transcription from conversational
+// and sideband routes. No client-controlled upstream URL or extra query is forwarded.
+func transcriptionRealtimeQuery(rawQuery string) (bool, error) {
+	query, errParse := url.ParseQuery(rawQuery)
+	if errParse != nil {
+		return false, errors.New("Invalid Realtime query")
+	}
+	intents, present := query["intent"]
+	if !present {
+		return false, nil
+	}
+	if len(intents) != 1 || intents[0] != "transcription" {
+		return false, errors.New("Only intent=transcription is supported")
+	}
+	if len(query) != 1 {
+		return false, errors.New("Transcription accepts only the intent query parameter")
+	}
+	return true, nil
+}
+
 func (h *Handler) directRealtimeURL(model string) string {
 	values := make(url.Values)
 	values.Set("model", strings.TrimSpace(model))
@@ -471,4 +565,41 @@ func closeHandshakeBody(response *http.Response, label string) {
 	if errClose := response.Body.Close(); errClose != nil {
 		log.Errorf("codex realtime: close %s response body error: %v", label, errClose)
 	}
+}
+
+// Gorilla applies context deadlines to the handshake socket, but cancellation
+// alone does not interrupt its HTTP upgrade read. Close the raw connection on
+// cancellation only during setup, detaching the callback before returning it.
+func dialTranscriptionSetup(ctx context.Context, dialer *websocket.Dialer, upstreamURL string, headers http.Header) (*websocket.Conn, *http.Response, error) {
+	netDial := dialer.NetDialContext
+	if netDial == nil {
+		netDial = (&net.Dialer{}).DialContext
+	}
+	stopCancellation := func() {}
+	dialer.NetDialContext = func(dialCtx context.Context, network, address string) (net.Conn, error) {
+		conn, errDial := netDial(dialCtx, network, address)
+		if errDial != nil {
+			return nil, errDial
+		}
+		done := make(chan struct{})
+		stop := context.AfterFunc(ctx, func() {
+			_ = conn.Close()
+			close(done)
+		})
+		stopCancellation = func() {
+			if !stop() {
+				<-done
+			}
+		}
+		return conn, nil
+	}
+	conn, response, errDial := dialer.DialContext(ctx, upstreamURL, headers)
+	stopCancellation()
+	if errContext := ctx.Err(); errContext != nil {
+		if conn != nil {
+			_ = conn.Close()
+		}
+		return nil, response, errContext
+	}
+	return conn, response, errDial
 }
