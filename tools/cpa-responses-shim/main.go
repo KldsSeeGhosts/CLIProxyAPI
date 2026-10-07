@@ -95,7 +95,7 @@ func run(opts options) error {
 	}
 
 	proxy := httputil.NewSingleHostReverseProxy(backendURL)
-	proxy.ModifyResponse = museModifyResponse
+	proxy.ModifyResponse = modifyResponse
 	proxy.ErrorLog = log.New(os.Stderr, "cpa-responses-shim proxy: ", log.LstdFlags)
 	handler := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if shouldRewrite(r) {
@@ -194,9 +194,13 @@ func rewriteResponsesRequest(r *http.Request) error {
 	wire := wireForPath(r.URL.Path)
 	if wire == wireResponses {
 		var original map[string]any
-		if json.Unmarshal(body, &original) == nil && isOpenCodeModel(stringValue(original["model"])) {
-			identities := museToolIdentities(original)
-			*r = *r.WithContext(context.WithValue(r.Context(), museIdentityKey{}, identities))
+		if json.Unmarshal(body, &original) == nil {
+			if isOpenCodeModel(stringValue(original["model"])) {
+				identities := museToolIdentities(original)
+				*r = *r.WithContext(context.WithValue(r.Context(), museIdentityKey{}, identities))
+			} else if declaresClientToolSearch(original) {
+				*r = *r.WithContext(context.WithValue(r.Context(), toolSearchKey{}, true))
+			}
 		}
 	}
 	rewritten, changed, err := rewriteRequestJSON(wire, body)
@@ -234,6 +238,9 @@ func rewriteRequestJSON(w wire, body []byte) ([]byte, bool, error) {
 	changed := false
 	if isGeminiModel(model) {
 		changed = sanitizeGeminiReplay(root) || changed
+	}
+	if w == wireResponses && !isOpenCodeModel(model) && emulatesToolSearch(model) && declaresClientToolSearch(root) {
+		changed = emulateToolSearchRequest(root) || changed
 	}
 	if isOpenCodeModel(model) {
 		switch w {
