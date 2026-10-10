@@ -1,0 +1,15 @@
+[Unit]
+Description=CPA model catalog pilot
+After=network.target
+
+[Service]
+Type=simple
+ExecStart=/usr/bin/python3 %h/.local/lib/cpa-model-catalog/catalog_server.py serve
+Restart=on-failure
+RestartSec=3
+NoNewPrivileges=true
+PrivateTmp=true
+UMask=0077
+
+[Install]
+WantedBy=default.target
