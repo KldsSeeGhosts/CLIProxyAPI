@@ -1,6 +1,7 @@
 package live
 
 import (
+	"context"
 	"encoding/json"
 	"io"
 	"net/http"
@@ -12,7 +13,9 @@ import (
 
 	"github.com/gin-gonic/gin"
 	"github.com/gorilla/websocket"
+	"github.com/router-for-me/CLIProxyAPI/v8/internal/config"
 	"github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/auth"
+	"github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/executionregistry"
 )
 
 func TestTranscriptionRealtimeQuery(t *testing.T) {
@@ -188,6 +191,155 @@ func TestTranscriptionWebsocketRefreshesBeforeUpgradeOnlyOnce(t *testing.T) {
 			}
 			if executor.refreshCalls.Load() != 1 || attempts.Load() != 2 {
 				t.Fatalf("refreshes=%d attempts=%d", executor.refreshCalls.Load(), attempts.Load())
+			}
+		})
+	}
+}
+
+// The selector has no request deadline to inherit. It must see the acquisition
+// deadline and unblock when it expires, before downstream is upgraded.
+type stalledTranscriptionDispatcher struct {
+	homeDispatcher
+	deadline chan time.Time
+}
+
+func (d *stalledTranscriptionDispatcher) RPopAuth(ctx context.Context, _ string, _ string, _ http.Header, _ int) ([]byte, error) {
+	deadline, _ := ctx.Deadline()
+	d.deadline <- deadline
+	<-ctx.Done()
+	return nil, ctx.Err()
+}
+
+func TestTranscriptionWebsocketBoundsStalledSelector(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	runtimeConfig := &config.Config{Home: config.HomeConfig{Enabled: true}}
+	manager := auth.NewManager(nil, nil, nil)
+	manager.SetConfig(runtimeConfig)
+	dispatcher := &stalledTranscriptionDispatcher{deadline: make(chan time.Time, 1)}
+	manager.PublishHomeDispatch(dispatcher, executionregistry.New(), 1)
+	manager.RegisterExecutor(&captureExecutor{})
+	handler := NewHandler(manager, runtimeConfig)
+	router := gin.New()
+	router.GET("/v1/realtime", handler.HandleRealtimeWebsocket)
+	request := httptest.NewRequest(http.MethodGet, "/v1/realtime?intent=transcription", nil)
+	request.Header.Set("Connection", "Upgrade")
+	request.Header.Set("Upgrade", "websocket")
+	ctx, cancel := context.WithCancel(request.Context())
+	defer cancel()
+	recorder := httptest.NewRecorder()
+	done := make(chan struct{})
+	start := time.Now()
+	go func() {
+		router.ServeHTTP(recorder, request.WithContext(ctx))
+		close(done)
+	}()
+	select {
+	case deadline := <-dispatcher.deadline:
+		if deadline.IsZero() || deadline.After(time.Now().Add(transcriptionSetupTimeout)) {
+			cancel()
+			<-done
+			t.Fatal("selector did not receive the setup deadline")
+		}
+	case <-time.After(5 * time.Second):
+		cancel()
+		<-done
+		t.Fatal("selector not called")
+	}
+	select {
+	case <-done:
+	case <-time.After(transcriptionSetupTimeout + 5*time.Second):
+		cancel()
+		<-done
+		t.Fatal("stalled selector outlived setup budget")
+	}
+	if recorder.Code != http.StatusGatewayTimeout || !strings.Contains(recorder.Body.String(), "realtime_setup_timeout") {
+		t.Fatalf("status=%d body=%s", recorder.Code, recorder.Body.String())
+	}
+	if time.Since(start) < transcriptionSetupTimeout {
+		t.Fatal("selector returned before its deadline")
+	}
+}
+
+type blockingTranscriptionPreparer struct {
+	captureExecutor
+	started chan context.Context
+}
+
+func (e *blockingTranscriptionPreparer) PrepareRequest(req *http.Request, _ *auth.Auth) error {
+	e.started <- req.Context()
+	<-req.Context().Done()
+	return req.Context().Err()
+}
+
+func TestTranscriptionWebsocketHomeCancellationBoundsSetup(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	for _, stage := range []string{"preparation", "dial"} {
+		t.Run(stage, func(t *testing.T) {
+			started := make(chan context.Context, 1)
+			stopUpstream := make(chan struct{})
+			upstreamServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				started <- r.Context()
+				select {
+				case <-r.Context().Done():
+				case <-stopUpstream:
+				}
+			}))
+			defer upstreamServer.Close()
+			defer close(stopUpstream)
+			runtimeConfig := &config.Config{Home: config.HomeConfig{Enabled: true}}
+			manager := auth.NewManager(nil, nil, nil)
+			manager.SetConfig(runtimeConfig)
+			registry := executionregistry.New()
+			manager.PublishHomeDispatch(&homeDispatcher{}, registry, 1)
+			if stage == "preparation" {
+				manager.RegisterExecutor(&blockingTranscriptionPreparer{started: started})
+			} else {
+				manager.RegisterExecutor(&captureExecutor{})
+			}
+			handler := NewHandler(manager, runtimeConfig)
+			handler.sidebandAPIBaseURL = "ws" + strings.TrimPrefix(upstreamServer.URL, "http") + "/v1"
+			router := gin.New()
+			router.GET("/v1/realtime", handler.HandleRealtimeWebsocket)
+			request := httptest.NewRequest(http.MethodGet, "/v1/realtime?intent=transcription", nil)
+			request.Header.Set("Connection", "Upgrade")
+			request.Header.Set("Upgrade", "websocket")
+			ctx, cancel := context.WithCancel(request.Context())
+			defer cancel()
+			recorder := httptest.NewRecorder()
+			done := make(chan struct{})
+			go func() {
+				router.ServeHTTP(recorder, request.WithContext(ctx))
+				close(done)
+			}()
+			select {
+			case acquisitionCtx := <-started:
+				if stage == "preparation" {
+					deadline, ok := acquisitionCtx.Deadline()
+					if !ok || deadline.After(time.Now().Add(transcriptionSetupTimeout)) {
+						cancel()
+						<-done
+						t.Fatal("preparation not bounded by setup deadline")
+					}
+				}
+			case <-time.After(5 * time.Second):
+				cancel()
+				<-done
+				t.Fatal("setup stage not reached")
+			}
+			// Closing the Home registry cancels selection-owned attempts, not the
+			// HTTP request. Both preparation and dialing must honor that signal.
+			if err := registry.Close(); err != nil {
+				t.Fatal(err)
+			}
+			select {
+			case <-done:
+			case <-time.After(5 * time.Second):
+				cancel()
+				<-done
+				t.Fatal("Home cancellation did not terminate acquisition")
+			}
+			if ctx.Err() != nil || recorder.Code == http.StatusSwitchingProtocols {
+				t.Fatalf("request canceled or downstream upgraded: ctx=%v status=%d", ctx.Err(), recorder.Code)
 			}
 		})
 	}

@@ -651,6 +651,7 @@ func (m *Manager) refreshAuthForRequestAtEpoch(ctx context.Context, id, failedAc
 	}
 
 	m.mu.RLock()
+	// Snapshot under the lock before result accounting can mutate ModelStates.
 	auth := m.auths[id].Clone()
 	var exec ProviderExecutor
 	if auth != nil {
