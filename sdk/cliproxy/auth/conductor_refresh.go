@@ -518,8 +518,20 @@ func (m *Manager) refreshAuthForRequest(ctx context.Context, id, failedAccessTok
 		lock = &authRefreshLock{}
 		m.refreshLocks.Store(id, lock)
 	}
-	lock.mu.Lock()
+	// A concurrent refresh must not hold an acquisition request beyond its budget.
+	for !lock.mu.TryLock() {
+		timer := time.NewTimer(10 * time.Millisecond)
+		select {
+		case <-ctx.Done():
+			timer.Stop()
+			return nil, ctx.Err()
+		case <-timer.C:
+		}
+	}
 	defer lock.mu.Unlock()
+	if errContext := ctx.Err(); errContext != nil {
+		return nil, errContext
+	}
 
 	m.mu.RLock()
 	auth := m.auths[id]
@@ -528,6 +540,9 @@ func (m *Manager) refreshAuthForRequest(ctx context.Context, id, failedAccessTok
 		// Use the same effective provider key as request execution so OpenAI-compat
 		// auths registered under namespaced keys still resolve for refresh.
 		exec, _ = m.executorLocked(executorKeyFromAuth(auth))
+		// Manager-owned auth (including ModelStates) can be mutated by MarkResult.
+		// Only use a detached snapshot after releasing the manager lock.
+		auth = auth.Clone()
 	}
 	m.mu.RUnlock()
 	if auth == nil || exec == nil {
@@ -639,6 +654,16 @@ func (m *Manager) refreshAuthForRequest(ctx context.Context, id, failedAccessTok
 		registry.GetGlobalRegistry().ApplyClientModelProjections(id, regEpoch, targetAuth.Generation, projections)
 	}
 	return saved.Clone(), nil
+}
+
+// RefreshLocalAuthAfterUnauthorized refreshes a local OAuth snapshot after a
+// rejected setup handshake. Concurrent callers reuse a token already replaced by
+// another refresh; Home credentials must be refreshed by their owning Home node.
+func (m *Manager) RefreshLocalAuthAfterUnauthorized(ctx context.Context, failedAuth *Auth) (*Auth, error) {
+	if m == nil || m.HomeEnabled() || failedAuth == nil || failedAuth.AuthKind() != AuthKindOAuth || !authHasRefreshCredential(failedAuth) {
+		return nil, errors.New("local OAuth refresh unavailable")
+	}
+	return m.refreshAuthForRequest(ctx, failedAuth.ID, authAccessToken(failedAuth))
 }
 
 // ForceRefreshAuth triggers an immediate synchronous refresh for the credential.

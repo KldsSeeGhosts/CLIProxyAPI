@@ -115,12 +115,17 @@ func (m *Manager) Register(ctx context.Context, auth *Auth) (*Auth, error) {
 	auth.Generation = 1
 	authClone := auth.Clone()
 	m.auths[auth.ID] = authClone
+	// Snapshot scheduler input before result accounting can mutate the installed auth.
+	var schedulerAuth *Auth
+	if m.scheduler != nil {
+		schedulerAuth = authClone.Clone()
+	}
 	m.mu.Unlock()
 	if !shouldDeferAPIKeyModelAliasRebuild(ctx) {
 		m.rebuildAPIKeyModelAliasFromRuntimeConfig()
 	}
 	if m.scheduler != nil {
-		m.scheduler.upsertAuth(authClone.Clone())
+		m.scheduler.upsertAuth(schedulerAuth)
 	}
 	m.structuralEpoch.Add(1)
 	m.queueRefreshReschedule(auth.ID)
@@ -261,12 +266,17 @@ func (m *Manager) updateInternal(ctx context.Context, base, auth *Auth, mode upd
 	}
 	authClone := auth.Clone()
 	m.auths[auth.ID] = authClone
+	// Snapshot scheduler input before result accounting can mutate the installed auth.
+	var schedulerAuth *Auth
+	if m.scheduler != nil {
+		schedulerAuth = authClone.Clone()
+	}
 	m.mu.Unlock()
 	if !shouldDeferAPIKeyModelAliasRebuild(ctx) {
 		m.rebuildAPIKeyModelAliasFromRuntimeConfig()
 	}
 	if m.scheduler != nil {
-		m.scheduler.upsertAuth(authClone.Clone())
+		m.scheduler.upsertAuth(schedulerAuth)
 	}
 	m.structuralEpoch.Add(1)
 	m.queueRefreshReschedule(auth.ID)
