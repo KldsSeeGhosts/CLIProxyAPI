@@ -5,9 +5,9 @@ import (
 	"encoding/json"
 	"testing"
 
-	sdktranslator "github.com/router-for-me/CLIProxyAPI/v7/sdk/translator"
+	sdktranslator "github.com/router-for-me/CLIProxyAPI/v8/sdk/translator"
 
-	_ "github.com/router-for-me/CLIProxyAPI/v7/internal/translator"
+	_ "github.com/router-for-me/CLIProxyAPI/v8/internal/translator"
 )
 
 func TestNormalizeClaudePluginPayloadTranslates(t *testing.T) {
@@ -28,8 +28,8 @@ func TestNormalizeClaudePluginPayloadTranslates(t *testing.T) {
 		sdktranslator.FormatClaude, sdktranslator.FormatOpenAI,
 		"zai/glm-5.3-flash", claudeResp, claudeResp, wrapped, nil)
 	var openaiResp struct {
-		Model    string `json:"model"`
-		Choices  []struct {
+		Model   string `json:"model"`
+		Choices []struct {
 			Message struct {
 				Content string `json:"content"`
 			} `json:"message"`

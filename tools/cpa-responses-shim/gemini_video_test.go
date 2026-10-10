@@ -4,7 +4,7 @@ import (
 	"strings"
 	"testing"
 
-	antigravity "github.com/router-for-me/CLIProxyAPI/v7/internal/translator/antigravity/openai/responses"
+	antigravity "github.com/router-for-me/CLIProxyAPI/v8/internal/translator/antigravity/openai/responses"
 	"github.com/tidwall/gjson"
 )
 
@@ -19,7 +19,10 @@ func TestGeminiVideoSurvivesShimAndTranslator(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		out := antigravity.ConvertOpenAIResponsesRequestToAntigravity("gemini-3.8-flash-high", rewritten, true)
+		out, err := antigravity.ConvertOpenAIResponsesRequestToAntigravity("gemini-3.8-flash-high", rewritten, true)
+		if err != nil {
+			t.Fatal(err)
+		}
 		found := false
 		gjson.GetBytes(out, "request.contents").ForEach(func(_, turn gjson.Result) bool {
 			turn.Get("parts").ForEach(func(_, part gjson.Result) bool {

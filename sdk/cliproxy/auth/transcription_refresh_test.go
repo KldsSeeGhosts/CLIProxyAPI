@@ -3,7 +3,7 @@ package auth
 import (
 	"context"
 	"errors"
-	internalconfig "github.com/router-for-me/CLIProxyAPI/v7/internal/config"
+	internalconfig "github.com/router-for-me/CLIProxyAPI/v8/internal/config"
 	"testing"
 )
 
