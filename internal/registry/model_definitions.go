@@ -248,6 +248,12 @@ func GetXAIModels() []*ModelInfo {
 // not depend on remote models.json updates. Built-ins replace any matching IDs
 // already present in the provided slice.
 func WithCodexBuiltins(models []*ModelInfo) []*ModelInfo {
+	// Preserve the October 11 Codex/Work default while remote catalogs catch up.
+	for _, model := range models {
+		if model != nil && model.ID == "gpt-6.1-sol" && model.ContextLength == 272000 {
+			model.ContextLength = 500000
+		}
+	}
 	return upsertModelInfos(models,
 		codexBuiltinImage15ModelInfo(),
 		codexBuiltinImageModelInfo(),

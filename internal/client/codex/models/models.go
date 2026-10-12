@@ -110,6 +110,10 @@ func buildCodexClientModelsWithToolCapabilities(models []map[string]any, provide
 
 		if template, ok := templates[metadataID]; ok {
 			entry := cloneCodexClientModelMap(template)
+			// Correct stale remote Sol defaults without overriding explicit limits.
+			if metadataID == "gpt-6.1-sol" && intModelValue(entry, "context_window") == 272000 {
+				entry["context_window"] = 500000
+			}
 			entry["slug"] = id
 			info := registry.LookupModelInfo(id)
 			applyCodexClientModelCapabilities(entry, id, metadataID, info, providersForModel, clientVersion)
