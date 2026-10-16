@@ -276,7 +276,19 @@ func withAntigravityBuiltins(models []*ModelInfo) []*ModelInfo {
 		antigravityGemini38FlashModelInfo("low"),
 		antigravityGemini38FlashModelInfo("medium"),
 		antigravityGemini38FlashModelInfo("high"),
+		antigravityArgonModelInfo("low"),
+		antigravityArgonModelInfo("medium"),
+		antigravityArgonModelInfo("high"),
 	)
+}
+
+func antigravityArgonModelInfo(tier string) *ModelInfo {
+	model := antigravityGemini38FlashModelInfo(tier)
+	model.ID = "gemini-4-argon-" + tier
+	model.Name = model.ID
+	model.DisplayName = "Gemini 4 Argon"
+	model.Description = "Gemini 4 Argon (" + tier + ")"
+	return model
 }
 
 func antigravityGemini38FlashModelInfo(tier string) *ModelInfo {

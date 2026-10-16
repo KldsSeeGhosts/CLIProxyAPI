@@ -16,6 +16,19 @@ func decodeTestJSON(t *testing.T, raw []byte) map[string]any {
 	return out
 }
 
+func TestArgonReplayUsesGeminiSanitization(t *testing.T) {
+	for _, model := range []string{"gemini-4-argon", "gemini-4-argon-low", "gemini-4-argon-medium", "gemini-4-argon-high"} {
+		if !isGeminiModel(model) {
+			t.Fatal(model)
+		}
+		input := []byte(`{"model":"` + model + `","input":[{"type":"function_call","thoughtSignature":"stale","arguments":"{}"}]}`)
+		out, changed, err := rewriteRequestJSON(wireResponses, input)
+		if err != nil || !changed || bytes.Contains(out, []byte("stale")) {
+			t.Fatalf("%s: %s, %v", model, out, err)
+		}
+	}
+}
+
 func TestRewriteRequestJSONStripsGeminiReplayFields(t *testing.T) {
 	input := []byte(`{
 		"model":"gemini-3.8-flash",

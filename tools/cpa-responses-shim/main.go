@@ -265,7 +265,7 @@ func rewriteRequestJSON(w wire, body []byte) ([]byte, bool, error) {
 
 func isGeminiModel(model string) bool {
 	model = strings.ToLower(strings.TrimSpace(model))
-	return strings.HasPrefix(model, "gemini-3.8-flash")
+	return strings.HasPrefix(model, "gemini-3.8-flash") || model == "gemini-4-argon" || strings.HasPrefix(model, "gemini-4-argon-")
 }
 
 // openCodeBareAliases are unprefixed config aliases routed to OpenCode Go.
