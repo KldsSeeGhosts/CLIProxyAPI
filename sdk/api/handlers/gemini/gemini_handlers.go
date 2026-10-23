@@ -224,7 +224,7 @@ func (h *GeminiAPIHandler) handleStreamGenerateContent(c *gin.Context, modelName
 	}
 	var keepAliveC <-chan time.Time
 	stopKeepAlive := func() {}
-	if alt == "" {
+	if !geminiStreamKeepAliveDisabled(c, alt) {
 		keepAliveC, stopKeepAlive = handlers.NewPreFirstTokenKeepAliveTicker(h.CurrentConfig())
 	}
 	defer stopKeepAlive()
@@ -363,9 +363,15 @@ func (h *GeminiAPIHandler) handleGenerateContent(c *gin.Context, modelName strin
 	cliCancel()
 }
 
+// Antigravity's SDK rejects SSE comment heartbeats as invalid stream chunks.
+// Suppress only proxy-generated heartbeats for this client, not other streams.
+func geminiStreamKeepAliveDisabled(c *gin.Context, alt string) bool {
+	return alt != "" || strings.HasPrefix(c.GetHeader("User-Agent"), "google-antigravity-sdk/")
+}
+
 func (h *GeminiAPIHandler) forwardGeminiStream(c *gin.Context, flusher http.Flusher, alt string, cancel func(error), data <-chan []byte, errs <-chan *interfaces.ErrorMessage) {
 	var keepAliveInterval *time.Duration
-	if alt != "" {
+	if geminiStreamKeepAliveDisabled(c, alt) {
 		keepAliveInterval = new(time.Duration(0))
 	}
 
