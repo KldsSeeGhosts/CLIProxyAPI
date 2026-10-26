@@ -112,9 +112,8 @@
       "context_length": 1000000,
       "max_completion_tokens": 128000,
       "thinking": {
-        "min": 1024,
-        "max": 128000,
         "zero_allowed": true,
+        "dynamic_allowed": true,
         "levels": [
           "low",
           "medium",
@@ -142,9 +141,8 @@
       "context_length": 1000000,
       "max_completion_tokens": 128000,
       "thinking": {
-        "min": 1024,
-        "max": 128000,
         "zero_allowed": true,
+        "dynamic_allowed": true,
         "levels": [
           "low",
           "medium",
@@ -233,9 +231,8 @@
       "context_length": 1000000,
       "max_completion_tokens": 128000,
       "thinking": {
-        "min": 1024,
-        "max": 128000,
-        "zero_allowed": true,
+        "zero_allowed": false,
+        "dynamic_allowed": true,
         "levels": [
           "low",
           "medium",
@@ -263,9 +260,8 @@
       "context_length": 1000000,
       "max_completion_tokens": 128000,
       "thinking": {
-        "min": 1024,
-        "max": 128000,
-        "zero_allowed": true,
+        "zero_allowed": false,
+        "dynamic_allowed": true,
         "levels": [
           "low",
           "medium",
@@ -296,7 +292,7 @@
       "context_length": 1000000,
       "max_completion_tokens": 128000,
       "thinking": {
-        "zero_allowed": true,
+        "zero_allowed": false,
         "dynamic_allowed": true,
         "levels": [
           "low",
@@ -330,6 +326,7 @@
       "thinking": {
         "zero_allowed": true,
         "dynamic_allowed": true,
+        "disable_type": "between_tools",
         "levels": [
           "low",
           "medium",
@@ -2912,6 +2909,41 @@
       "support_configuration_update": true
     },
     {
+      "id": "gpt-6.1-terra",
+      "object": "model",
+      "created": 1792972800,
+      "owned_by": "openai",
+      "type": "openai",
+      "display_name": "GPT 6.1 Terra",
+      "version": "gpt-6.1",
+      "description": "Efficient GPT 6.1 model for fast coding and everyday work at a lower cost.",
+      "context_length": 500000,
+      "max_completion_tokens": 128000,
+      "supported_parameters": [
+        "tools"
+      ],
+      "thinking": {
+        "levels": [
+          "low",
+          "medium",
+          "high",
+          "xhigh",
+          "max"
+        ]
+      },
+      "supportedInputModalities": [
+        "text",
+        "image"
+      ],
+      "supportedOutputModalities": [
+        "text"
+      ],
+      "native_capabilities": {
+        "web_search": true
+      },
+      "support_configuration_update": true
+    },
+    {
       "id": "gpt-6-luna",
       "object": "model",
       "created": 1790035200,
@@ -3228,6 +3260,41 @@
       "support_configuration_update": true
     },
     {
+      "id": "gpt-6.1-terra",
+      "object": "model",
+      "created": 1792972800,
+      "owned_by": "openai",
+      "type": "openai",
+      "display_name": "GPT 6.1 Terra",
+      "version": "gpt-6.1",
+      "description": "Efficient GPT 6.1 model for fast coding and everyday work at a lower cost.",
+      "context_length": 500000,
+      "max_completion_tokens": 128000,
+      "supported_parameters": [
+        "tools"
+      ],
+      "thinking": {
+        "levels": [
+          "low",
+          "medium",
+          "high",
+          "xhigh",
+          "max"
+        ]
+      },
+      "supportedInputModalities": [
+        "text",
+        "image"
+      ],
+      "supportedOutputModalities": [
+        "text"
+      ],
+      "native_capabilities": {
+        "web_search": true
+      },
+      "support_configuration_update": true
+    },
+    {
       "id": "gpt-6-luna",
       "object": "model",
       "created": 1790035200,
@@ -3517,6 +3584,41 @@
       "display_name": "GPT 6.1 Sol",
       "version": "gpt-6.0",
       "description": "Latest workhorse model for coding and everyday work.",
+      "context_length": 500000,
+      "max_completion_tokens": 128000,
+      "supported_parameters": [
+        "tools"
+      ],
+      "thinking": {
+        "levels": [
+          "low",
+          "medium",
+          "high",
+          "xhigh",
+          "max"
+        ]
+      },
+      "supportedInputModalities": [
+        "text",
+        "image"
+      ],
+      "supportedOutputModalities": [
+        "text"
+      ],
+      "native_capabilities": {
+        "web_search": true
+      },
+      "support_configuration_update": true
+    },
+    {
+      "id": "gpt-6.1-terra",
+      "object": "model",
+      "created": 1792972800,
+      "owned_by": "openai",
+      "type": "openai",
+      "display_name": "GPT 6.1 Terra",
+      "version": "gpt-6.1",
+      "description": "Efficient GPT 6.1 model for fast coding and everyday work at a lower cost.",
       "context_length": 500000,
       "max_completion_tokens": 128000,
       "supported_parameters": [
