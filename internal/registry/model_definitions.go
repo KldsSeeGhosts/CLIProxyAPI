@@ -254,6 +254,7 @@ func WithCodexBuiltins(models []*ModelInfo) []*ModelInfo {
 			model.ContextLength = 500000
 		}
 	}
+	models = withCodexBuiltinTerra61(models)
 	return upsertModelInfos(models,
 		codexBuiltinImage15ModelInfo(),
 		codexBuiltinImageModelInfo(),
@@ -320,6 +321,37 @@ func normalizeAntigravityCapabilityModelID(modelID string) string {
 		modelID = strings.TrimSpace(modelID[:open])
 	}
 	return modelID
+}
+
+// withCodexBuiltinTerra61 keeps GPT 6.1 Terra available on the paid Codex
+// tiers that serve GPT 6.1 Sol while remote catalogs lack it (fork). It reuses
+// Sol's limits and reasoning levels, and never replaces an existing entry.
+func withCodexBuiltinTerra61(models []*ModelInfo) []*ModelInfo {
+	var sol *ModelInfo
+	for _, model := range models {
+		if model == nil {
+			continue
+		}
+		switch model.ID {
+		case "gpt-6.1-terra":
+			return models
+		case "gpt-6.1-sol":
+			sol = model
+		}
+	}
+	if sol == nil {
+		return models
+	}
+	terra := cloneModelInfo(sol)
+	terra.ID = "gpt-6.1-terra"
+	terra.DisplayName = "GPT 6.1 Terra"
+	terra.Description = "Efficient GPT 6.1 model for fast coding and everyday work at a lower cost."
+	terra.Created = 1793059200 // 2026-10-26
+	terra.ContextLength = 272000
+	if terra.MaxCompletionTokens == 0 {
+		terra.MaxCompletionTokens = 128000
+	}
+	return upsertModelInfos(models, terra)
 }
 
 func codexBuiltinImage15ModelInfo() *ModelInfo {
