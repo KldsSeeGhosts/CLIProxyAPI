@@ -63,8 +63,12 @@ irreproducible from GitHub), forces `GOAMD64=v1`, and stamps
   which produces a binary with **no ISA notes** and glibc symbol
   requirements capped at GLIBC_2.34 (server glibc 2.44 satisfies this).
   Verified in production 2026-09-22 (`v7.3.14-20-g2d9245e9` + cpa-zai-plugin).
-  The plugin `.so` itself is built separately (repo: `KldsSeeGhosts/cpa-zai-plugin`,
-  its `build.sh` does the same GOAMD64=v1 + readelf ISA verification) and is
+  The plugin `.so` itself is built separately from
+  [`KldsSeeGhosts/CPA-Manager-Plus/plugins/zai`](https://github.com/KldsSeeGhosts/CPA-Manager-Plus/tree/main/plugins/zai)
+  (private repository; source consolidation tracked in
+  [CPA-Manager-Plus#3](https://github.com/KldsSeeGhosts/CPA-Manager-Plus/pull/3)).
+  Run `bash build.sh` from that directory; it retains the GOAMD64=v1 + readelf
+  ISA verification and produces `dist/zai.so`. The artifact is
   deployed to `~/cliproxyapi/plugins/zai.so` — the host derives the plugin id
   from the filename, so the file MUST be named `zai.so` to match
   `plugins.configs.zai`.
