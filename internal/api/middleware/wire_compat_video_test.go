@@ -1,4 +1,4 @@
-package main
+package middleware
 
 import (
 	"strings"
@@ -8,14 +8,14 @@ import (
 	"github.com/tidwall/gjson"
 )
 
-func TestGeminiVideoSurvivesShimAndTranslator(t *testing.T) {
+func TestGeminiVideoSurvivesMiddlewareAndTranslator(t *testing.T) {
 	for _, videoURL := range []string{`"data:video/mp4;base64,QUJD"`, `{"url":"data:video/mp4;base64,QUJD"}`} {
 		body := []byte(`{"model":"gemini-3.8-flash","input":[
 			{"type":"function_call","call_id":"v1","name":"view_video","arguments":"{}"},
 			{"type":"function_call_output","call_id":"v1","output":"Prepared video"},
 			{"role":"user","content":[{"type":"input_video","video_url":` + videoURL + `,"video_metadata":{"fps":2,"startOffset":"1s","endOffset":"3s"}}]}
 		]}`)
-		rewritten, _, err := rewriteRequestJSON(wireResponses, body)
+		rewritten, _, err := rewriteWireCompatRequestJSON(wireKindResponses, body)
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -49,14 +49,14 @@ func TestGeminiVideoSurvivesShimAndTranslator(t *testing.T) {
 	}
 }
 
-func TestGeminiShimPreservesOnlyTypedReasoningCarriers(t *testing.T) {
+func TestGeminiMiddlewarePreservesOnlyTypedReasoningCarriers(t *testing.T) {
 	body := []byte(`{"model":"gemini-3.8-flash","input":[
 		{"type":"reasoning","encrypted_content":"cpa-gemini-responses-carrier-v1:next:function:QUJD"},
 		{"type":"reasoning","encrypted_content":"foreign-signature"},
 		{"type":"function_call_output","output":{"type":"reasoning","encrypted_content":"cpa-gemini-responses-carrier-v1:next:function:QUJD"}},
 		{"type":"function_call","thoughtSignature":"foreign-signature"}
 	]}`)
-	out, changed, err := rewriteRequestJSON(wireResponses, body)
+	out, changed, err := rewriteWireCompatRequestJSON(wireKindResponses, body)
 	if err != nil || !changed {
 		t.Fatalf("rewrite failed: changed=%v error=%v", changed, err)
 	}

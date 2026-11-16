@@ -195,6 +195,10 @@ func TestPionMediaRelayBridgesAudioAndDataChannel(t *testing.T) {
 	if errRelay != nil {
 		t.Fatalf("create media relay: %v", errRelay)
 	}
+	// Keep every peer in this bridge fixture on loopback. Host interface
+	// selection otherwise makes ICE depend on local firewall and VPN state.
+	relay.downstreamAPI = newTestWebRTCAPI(t)
+	relay.upstreamAPI = newTestWebRTCAPI(t)
 	session, relayOffer, errSession := relay.NewSession(context.Background(), clientOffer, mediaSessionRoute{
 		credential: "Voice credential",
 		authIndex:  "auth-index",
@@ -367,9 +371,14 @@ func newTestWebRTCAPI(t *testing.T) *webrtc.API {
 	if errRegister := webrtc.RegisterDefaultInterceptors(mediaEngine, interceptorRegistry); errRegister != nil {
 		t.Fatalf("register test interceptors: %v", errRegister)
 	}
+	settingEngine := webrtc.SettingEngine{}
+	settingEngine.SetNetworkTypes([]webrtc.NetworkType{webrtc.NetworkTypeUDP4})
+	settingEngine.SetIncludeLoopbackCandidate(true)
+	settingEngine.SetIPFilter(func(ip net.IP) bool { return ip != nil && ip.IsLoopback() })
 	return webrtc.NewAPI(
 		webrtc.WithMediaEngine(mediaEngine),
 		webrtc.WithInterceptorRegistry(interceptorRegistry),
+		webrtc.WithSettingEngine(settingEngine),
 	)
 }
 

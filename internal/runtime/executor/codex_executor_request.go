@@ -259,19 +259,25 @@ func alignCodexContentEncoding(req *http.Request) {
 	}
 }
 
-func decodeCodexUpstreamResponse(resp *http.Response) error {
+// decodeCodexUpstreamResponse returns an owned copy of resp with a decoded body and
+// adjusted headers. The transport's readLoop still accesses the original response while
+// the body is open (for example to merge trailers), so the copy avoids mutating fields
+// shared with net/http internals.
+func decodeCodexUpstreamResponse(resp *http.Response) (*http.Response, error) {
 	if resp == nil || resp.Body == nil {
-		return nil
+		return resp, nil
 	}
 	decoded, errDecode := helps.DecodeResponseBody(resp.Body, resp.Header)
 	if errDecode != nil {
-		return fmt.Errorf("codex executor: decode upstream response: %w", errDecode)
+		return nil, fmt.Errorf("codex executor: decode upstream response: %w", errDecode)
 	}
-	resp.Body = decoded
-	resp.Header.Del("Content-Encoding")
-	resp.Header.Del("Content-Length")
-	resp.ContentLength = -1
-	return nil
+	owned := *resp
+	owned.Header = resp.Header.Clone()
+	owned.Body = decoded
+	owned.Header.Del("Content-Encoding")
+	owned.Header.Del("Content-Length")
+	owned.ContentLength = -1
+	return &owned, nil
 }
 
 // doCodexRequest retries a rejected zstd body once without rerunning payload rules.
@@ -285,9 +291,11 @@ func doCodexRequest(client *http.Client, req *http.Request, upstreamBody []byte,
 	if responseReady != nil {
 		responseReady(resp)
 	}
-	if errDecode := decodeCodexUpstreamResponse(resp); errDecode != nil {
+	decodedResp, errDecode := decodeCodexUpstreamResponse(resp)
+	if errDecode != nil {
 		return nil, errDecode
 	}
+	resp = decodedResp
 	if !compressed || (resp.StatusCode != http.StatusBadRequest && resp.StatusCode != http.StatusUnsupportedMediaType) {
 		return resp, nil
 	}
@@ -309,10 +317,11 @@ func doCodexRequest(client *http.Client, req *http.Request, upstreamBody []byte,
 	if responseReady != nil {
 		responseReady(resp)
 	}
-	if errDecode := decodeCodexUpstreamResponse(resp); errDecode != nil {
+	decodedResp, errDecode = decodeCodexUpstreamResponse(resp)
+	if errDecode != nil {
 		return nil, errDecode
 	}
-	return resp, nil
+	return decodedResp, nil
 }
 
 func applyCodexHeaders(r *http.Request, auth *cliproxyauth.Auth, token string, stream bool, cfg *config.Config, clientHeaders ...http.Header) {

@@ -1,14 +1,4 @@
-package main
-
-import (
-	"bufio"
-	"bytes"
-	"encoding/json"
-	"fmt"
-	"io"
-	"net/http"
-	"strings"
-)
+package middleware
 
 // Codex (0.160+) defers MCP tools behind a native Responses `tool_search` tool
 // whose execution is "client": the model emits a `tool_search_call` item,
@@ -33,6 +23,12 @@ import (
 // declares a client-executed tool_search tool, so routes that natively return
 // tool_search_call items are never reshaped.
 
+import (
+	"encoding/json"
+	"fmt"
+	"strings"
+)
+
 const (
 	toolSearchName       = "tool_search"
 	toolSearchCallType   = "tool_search_call"
@@ -41,20 +37,18 @@ const (
 	functionCallIDPrefix = "fc_"
 )
 
-type toolSearchKey struct{}
-
 // emulatesToolSearch reports the models whose upstream translation
 // drops the tool_search declaration, so the whole protocol has to be emulated.
 func emulatesToolSearch(model string) bool {
-	return isGeminiModel(model)
+	return isWireCompatGeminiModel(model)
 }
 
 func isClientToolSearchDeclaration(value any) bool {
 	tool, ok := value.(map[string]any)
-	if !ok || strings.TrimSpace(stringValue(tool["type"])) != toolSearchName {
+	if !ok || strings.TrimSpace(wireCompatStringValue(tool["type"])) != toolSearchName {
 		return false
 	}
-	execution := strings.TrimSpace(stringValue(tool["execution"]))
+	execution := strings.TrimSpace(wireCompatStringValue(tool["execution"]))
 	return execution == "" || execution == "client"
 }
 
@@ -67,7 +61,7 @@ func declaresClientToolSearch(root map[string]any) bool {
 		}
 	}
 	for _, item := range rawToolSlice(root["input"]) {
-		if m, ok := item.(map[string]any); ok && stringValue(m["type"]) == "additional_tools" {
+		if m, ok := item.(map[string]any); ok && wireCompatStringValue(m["type"]) == "additional_tools" {
 			for _, tool := range rawToolSlice(m["tools"]) {
 				if isClientToolSearchDeclaration(tool) {
 					return true
@@ -84,7 +78,7 @@ func toolSearchFunction(tool map[string]any) map[string]any {
 		"name":   toolSearchName,
 		"strict": false,
 	}
-	if description := strings.TrimSpace(stringValue(tool["description"])); description != "" {
+	if description := strings.TrimSpace(wireCompatStringValue(tool["description"])); description != "" {
 		out["description"] = description
 	} else {
 		out["description"] = "Search deferred tools and load the matching ones for the next call."
@@ -122,7 +116,7 @@ func emulateToolSearchRequest(root map[string]any) bool {
 	var additional map[string]any
 	for _, value := range input {
 		item, ok := value.(map[string]any)
-		if !ok || stringValue(item["type"]) != "additional_tools" {
+		if !ok || wireCompatStringValue(item["type"]) != "additional_tools" {
 			continue
 		}
 		replaceDeclarations(rawToolSlice(item["tools"]))
@@ -139,7 +133,7 @@ func emulateToolSearchRequest(root map[string]any) bool {
 			rewritten = append(rewritten, value)
 			continue
 		}
-		switch stringValue(item["type"]) {
+		switch wireCompatStringValue(item["type"]) {
 		case toolSearchCallType:
 			if call, ok := flattenToolSearchCall(item); ok {
 				rewritten = append(rewritten, call)
@@ -170,8 +164,8 @@ func emulateToolSearchRequest(root map[string]any) bool {
 }
 
 func isClientToolSearchItem(item map[string]any) bool {
-	execution := strings.TrimSpace(stringValue(item["execution"]))
-	return (execution == "" || execution == "client") && strings.TrimSpace(stringValue(item["call_id"])) != ""
+	execution := strings.TrimSpace(wireCompatStringValue(item["execution"]))
+	return (execution == "" || execution == "client") && strings.TrimSpace(wireCompatStringValue(item["call_id"])) != ""
 }
 
 func flattenToolSearchCall(item map[string]any) (map[string]any, bool) {
@@ -197,7 +191,7 @@ func flattenToolSearchCall(item map[string]any) (map[string]any, bool) {
 		"call_id":   item["call_id"],
 		"arguments": arguments,
 	}
-	if id := stringValue(item["id"]); strings.HasPrefix(id, toolSearchIDPrefix) {
+	if id := wireCompatStringValue(item["id"]); strings.HasPrefix(id, toolSearchIDPrefix) {
 		call["id"] = functionCallIDPrefix + strings.TrimPrefix(id, toolSearchIDPrefix)
 	}
 	return call, true
@@ -227,8 +221,8 @@ func describeLoadedTools(tools []any) string {
 		}
 		namespace := ""
 		children := []any{tool}
-		if stringValue(tool["type"]) == "namespace" {
-			namespace = strings.TrimSpace(stringValue(tool["name"]))
+		if wireCompatStringValue(tool["type"]) == "namespace" {
+			namespace = strings.TrimSpace(wireCompatStringValue(tool["name"]))
 			children = rawToolSlice(tool["tools"])
 		}
 		for _, child := range children {
@@ -236,7 +230,7 @@ func describeLoadedTools(tools []any) string {
 			if !ok {
 				continue
 			}
-			name := strings.TrimSpace(stringValue(fn["name"]))
+			name := strings.TrimSpace(wireCompatStringValue(fn["name"]))
 			if name == "" {
 				continue
 			}
@@ -244,7 +238,7 @@ func describeLoadedTools(tools []any) string {
 			if namespace != "" {
 				line = "- " + namespace + "." + name
 			}
-			if description := strings.TrimSpace(stringValue(fn["description"])); description != "" {
+			if description := strings.TrimSpace(wireCompatStringValue(fn["description"])); description != "" {
 				if len(description) > 160 {
 					description = description[:160] + "..."
 				}
@@ -270,17 +264,17 @@ func mergeLoadedTools(existing []any, loaded []any) []any {
 		if !ok {
 			continue
 		}
-		if stringValue(tool["type"]) == "namespace" {
-			namespace := stringValue(tool["name"])
+		if wireCompatStringValue(tool["type"]) == "namespace" {
+			namespace := wireCompatStringValue(tool["name"])
 			namespaces[namespace] = tool
 			for _, child := range rawToolSlice(tool["tools"]) {
 				if c, ok := child.(map[string]any); ok {
-					declared[namespace+"/"+stringValue(c["name"])] = struct{}{}
+					declared[namespace+"/"+wireCompatStringValue(c["name"])] = struct{}{}
 				}
 			}
 			continue
 		}
-		declared["/"+stringValue(tool["name"])] = struct{}{}
+		declared["/"+wireCompatStringValue(tool["name"])] = struct{}{}
 	}
 	out := append([]any(nil), existing...)
 	for _, value := range loaded {
@@ -288,8 +282,8 @@ func mergeLoadedTools(existing []any, loaded []any) []any {
 		if !ok {
 			continue
 		}
-		if stringValue(tool["type"]) != "namespace" {
-			key := "/" + stringValue(tool["name"])
+		if wireCompatStringValue(tool["type"]) != "namespace" {
+			key := "/" + wireCompatStringValue(tool["name"])
 			if _, dup := declared[key]; dup {
 				continue
 			}
@@ -297,11 +291,11 @@ func mergeLoadedTools(existing []any, loaded []any) []any {
 			out = append(out, withoutDeferLoading(tool))
 			continue
 		}
-		namespace := stringValue(tool["name"])
+		namespace := wireCompatStringValue(tool["name"])
 		target, exists := namespaces[namespace]
 		if !exists {
 			target = map[string]any{"type": "namespace", "name": namespace, "tools": []any{}}
-			if description := stringValue(tool["description"]); description != "" {
+			if description := wireCompatStringValue(tool["description"]); description != "" {
 				target["description"] = description
 			}
 			namespaces[namespace] = target
@@ -313,7 +307,7 @@ func mergeLoadedTools(existing []any, loaded []any) []any {
 			if !ok {
 				continue
 			}
-			key := namespace + "/" + stringValue(c["name"])
+			key := namespace + "/" + wireCompatStringValue(c["name"])
 			if _, dup := declared[key]; dup {
 				continue
 			}
@@ -339,11 +333,11 @@ func withoutDeferLoading(tool map[string]any) map[string]any {
 // tool_search call: the emulated top-level function, and the reserved
 // "tool_search" namespace used by OpenAI Responses Lite.
 func isToolSearchFunctionCall(item map[string]any) bool {
-	if stringValue(item["type"]) != "function_call" {
+	if wireCompatStringValue(item["type"]) != "function_call" {
 		return false
 	}
-	namespace := strings.TrimSpace(stringValue(item["namespace"]))
-	name := strings.TrimSpace(stringValue(item["name"]))
+	namespace := strings.TrimSpace(wireCompatStringValue(item["namespace"]))
+	name := strings.TrimSpace(wireCompatStringValue(item["name"]))
 	return (namespace == "" && name == toolSearchName) || namespace == toolSearchName
 }
 
@@ -364,7 +358,7 @@ func restoreToolSearchCall(item map[string]any) bool {
 	item["arguments"] = arguments
 	delete(item, "name")
 	delete(item, "namespace")
-	if id := stringValue(item["id"]); strings.HasPrefix(id, functionCallIDPrefix) {
+	if id := wireCompatStringValue(item["id"]); strings.HasPrefix(id, functionCallIDPrefix) {
 		item["id"] = toolSearchIDPrefix + strings.TrimPrefix(id, functionCallIDPrefix)
 	}
 	return true
@@ -378,154 +372,4 @@ func restoreToolSearchOutput(root map[string]any) bool {
 		}
 	}
 	return changed
-}
-
-func toolSearchModifyResponse(resp *http.Response) error {
-	if enabled, _ := resp.Request.Context().Value(toolSearchKey{}).(bool); !enabled ||
-		resp.StatusCode < 200 || resp.StatusCode >= 300 || resp.Header.Get("Content-Encoding") != "" {
-		return nil
-	}
-	ct := strings.ToLower(resp.Header.Get("Content-Type"))
-	if strings.Contains(ct, "text/event-stream") {
-		source := resp.Body
-		reader, writer := io.Pipe()
-		resp.Body = &museResponseBody{Reader: reader, upstream: source, pipe: reader}
-		resp.ContentLength = -1
-		resp.Header.Del("Content-Length")
-		go func() {
-			err := translateToolSearchSSE(source, writer)
-			_ = source.Close()
-			_ = writer.CloseWithError(err)
-		}()
-		return nil
-	}
-	if !strings.Contains(ct, "application/json") {
-		return nil
-	}
-	raw, err := io.ReadAll(resp.Body)
-	_ = resp.Body.Close()
-	if err != nil {
-		return err
-	}
-	var root map[string]any
-	if json.Unmarshal(raw, &root) == nil && restoreToolSearchOutput(root) {
-		if encoded, err := json.Marshal(root); err == nil {
-			raw = encoded
-		}
-	}
-	resp.Body = io.NopCloser(bytes.NewReader(raw))
-	resp.ContentLength = int64(len(raw))
-	resp.Header.Set("Content-Length", fmt.Sprint(len(raw)))
-	return nil
-}
-
-// translateToolSearchSSE restores tool_search calls in a Responses event
-// stream. Argument delta/done events of a converted call are dropped: a
-// tool_search_call carries its complete arguments object on
-// response.output_item.done, and Codex has no use for partial JSON. Events
-// that need no change are forwarded byte for byte.
-func translateToolSearchSSE(source io.Reader, target io.Writer) error {
-	reader := bufio.NewReader(source)
-	converted := map[string]bool{}
-	var lines []string
-	emitRaw := func() error {
-		defer func() { lines = nil }()
-		if len(lines) == 0 {
-			_, err := io.WriteString(target, "\n")
-			return err
-		}
-		_, err := io.WriteString(target, strings.Join(lines, "\n")+"\n\n")
-		return err
-	}
-	flush := func() error {
-		if len(lines) == 0 {
-			return emitRaw()
-		}
-		var data []string
-		for _, line := range lines {
-			if strings.HasPrefix(line, "data:") {
-				data = append(data, strings.TrimPrefix(strings.TrimPrefix(line, "data:"), " "))
-			}
-		}
-		joined := strings.Join(data, "\n")
-		if len(data) == 0 || !strings.Contains(joined, "function_call") {
-			return emitRaw()
-		}
-		var event map[string]any
-		if json.Unmarshal([]byte(joined), &event) != nil {
-			return emitRaw()
-		}
-		kind := stringValue(event["type"])
-		changed := false
-		switch kind {
-		case "response.function_call_arguments.delta", "response.function_call_arguments.done":
-			if converted[stringValue(event["item_id"])] {
-				lines = nil
-				return nil
-			}
-		case "response.output_item.added", "response.output_item.done":
-			if item, ok := event["item"].(map[string]any); ok {
-				id := stringValue(item["id"])
-				if restoreToolSearchCall(item) {
-					if id != "" {
-						converted[id] = true
-					}
-					changed = true
-				}
-			}
-		}
-		if response, ok := event["response"].(map[string]any); ok && restoreToolSearchOutput(response) {
-			changed = true
-		}
-		if !changed {
-			return emitRaw()
-		}
-		encoded, err := json.Marshal(event)
-		if err != nil {
-			return err
-		}
-		for _, line := range lines {
-			if strings.HasPrefix(line, "data:") {
-				continue
-			}
-			if _, err := io.WriteString(target, line+"\n"); err != nil {
-				return err
-			}
-		}
-		_, err = fmt.Fprintf(target, "data: %s\n\n", encoded)
-		lines = nil
-		return err
-	}
-	for {
-		line, err := reader.ReadString('\n')
-		if len(line) > 0 {
-			line = strings.TrimSuffix(strings.TrimSuffix(line, "\n"), "\r")
-			if line == "" {
-				if e := flush(); e != nil {
-					return e
-				}
-			} else {
-				lines = append(lines, line)
-			}
-		}
-		if err != nil {
-			if err != io.EOF {
-				return err
-			}
-			if len(lines) > 0 {
-				return flush()
-			}
-			return nil
-		}
-	}
-}
-
-// modifyResponse applies the response-side transform that matches the request
-// scope: OpenCode Go routes restore flattened tool identities, every other
-// Responses route that declared tool_search restores its function-form calls.
-func modifyResponse(resp *http.Response) error {
-	if err := toolSearchModifyResponse(resp); err != nil {
-		return err
-	}
-	return museModifyResponse(resp)
 }
