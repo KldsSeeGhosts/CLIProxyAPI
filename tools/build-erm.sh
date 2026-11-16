@@ -1,10 +1,12 @@
 #!/usr/bin/env bash
-# Build the ERM line of CLIProxyAPI for deployment to serverseesghosts.
-# Static-only: CGO_ENABLED=0 is MANDATORY (see docs/DEPLOY-ERM.md) — cgo
-# builds link CachyOS glibc with x86-64-v4 ISA notes and fail on the
-# i7-8750H server; the isa-safety systemd dropin then silently reverts
-# to cli-proxy-api.backup-known-good.
+# Historical Linux builder. The active Mac Studio uses a native cgo build
+# and stable signing identities. See docs/DEPLOY-ERM.md.
 set -euo pipefail
+
+if [ "$(uname -s)" != Linux ]; then
+    echo "ERROR: this historical builder targets Linux. Use the native Studio runbook." >&2
+    exit 1
+fi
 
 cd "$(git rev-parse --show-toplevel)"
 
@@ -71,8 +73,5 @@ if [ "$PLUGINS" -eq 1 ]; then
     fi
 fi
 
-"$GO_BIN" build -trimpath -ldflags "-s -w" \
-  -o "$OUT/cpa-responses-shim" ./tools/cpa-responses-shim
-
-sha256sum "$OUT/cli-proxy-api" "$OUT/cpa-responses-shim"
-echo "==> next: pre-flight + deploy per docs/DEPLOY-ERM.md sections 2-4"
+sha256sum "$OUT/cli-proxy-api"
+echo "==> build complete; the retired Linux service must remain fenced."

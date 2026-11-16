@@ -6,6 +6,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/gin-gonic/gin"
 	cliproxyexecutor "github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/executor"
 )
 
@@ -142,9 +143,58 @@ func (m *Manager) recordCanceledUpstreamCooldown(ctx context.Context, auth *Auth
 	m.recordExecutionResult(context.WithoutCancel(ctx), result, auth, ephemeral)
 }
 
+// detachedGinContextKeys are the gin.Context keys read through the request context after
+// the handler returns (usage attribution and Home dispatch credentials).
+var detachedGinContextKeys = []string{"userApiKey", "accessProvider", "accessMetadata"}
+
+// detachGinContext returns a *gin.Context that remains safe to read after the originating
+// request's handler returns. Pooled gin.Context instances are reset and reused by later
+// requests, so background readers must not touch them. The detached context keeps the
+// request-scoped *http.Request (which is not pooled) and copies the context keys consulted
+// on background code paths. Reads go through Get, which takes the gin mutex, so the copy is
+// safe even while the request handler is still running.
+func detachGinContext(ginCtx *gin.Context) *gin.Context {
+	if ginCtx == nil {
+		return nil
+	}
+	detached := &gin.Context{
+		Request: ginCtx.Request,
+		Keys:    make(map[string]any, len(detachedGinContextKeys)),
+	}
+	for _, key := range detachedGinContextKeys {
+		if value, exists := ginCtx.Get(key); exists {
+			detached.Keys[key] = value
+		}
+	}
+	return detached
+}
+
+// DetachGinContext exposes detachGinContext for packages that must hand a snapshot to
+// goroutines outliving the originating request handler.
+func DetachGinContext(ginCtx *gin.Context) *gin.Context {
+	return detachGinContext(ginCtx)
+}
+
+// withDetachedGinContext returns ctx with the pooled *gin.Context replaced by a detached
+// snapshot. Any goroutine that can outlive the originating handler, including executor
+// internal workers, must only ever see the detached copy.
+func withDetachedGinContext(ctx context.Context) context.Context {
+	if ctx == nil {
+		return nil
+	}
+	if ginCtx, ok := ctx.Value("gin").(*gin.Context); ok && ginCtx != nil {
+		return context.WithValue(ctx, "gin", detachGinContext(ginCtx))
+	}
+	return ctx
+}
+
 func (m *Manager) wrapStreamResult(ctx context.Context, auth *Auth, provider, resultModel, routeModel string, headers http.Header, buffered []cliproxyexecutor.StreamChunk, remaining <-chan cliproxyexecutor.StreamChunk, aliasResult OAuthModelAliasResult, ephemeralResult bool, opts cliproxyexecutor.Options, executionSeq uint64) *cliproxyexecutor.StreamResult {
 	out := make(chan cliproxyexecutor.StreamChunk)
 	streamStart := time.Now()
+	// The forwarding goroutine can outlive the HTTP handler that produced ctx. gin.Context
+	// instances are pooled and reset by subsequent requests, so swap the pooled context for
+	// a detached snapshot before it can be read after the handler returns.
+	ctx = withDetachedGinContext(ctx)
 	go func() {
 		defer close(out)
 		var failed bool

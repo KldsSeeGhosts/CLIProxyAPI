@@ -1,9 +1,7 @@
-package main
+package middleware
 
 import (
-	"io"
 	"net/http"
-	"net/http/httptest"
 	"strings"
 	"testing"
 
@@ -30,7 +28,7 @@ const toolSearchHistory = `,
 			{"type":"function","name":"noches_dummy_ping","description":"Ping.","strict":false,"defer_loading":true,"parameters":{"type":"object","properties":{"word":{"type":"string"}}}}]}]}`
 
 func TestToolSearchGeminiDeclaredAsFunction(t *testing.T) {
-	out := rewriteOrFail(t, wireResponses, liteRequest("gemini-3.8-flash", ""))
+	out := rewriteWireCompatOrFail(t, wireKindResponses, liteRequest("gemini-3.8-flash", ""))
 	if got := gjson.GetBytes(out, "input.0.tools.1.type").String(); got != "function" {
 		t.Fatalf("tool_search not flattened to a function: %s", out)
 	}
@@ -44,7 +42,7 @@ func TestToolSearchGeminiDeclaredAsFunction(t *testing.T) {
 }
 
 func TestToolSearchGeminiTopLevelToolsDeclaredAsFunction(t *testing.T) {
-	out := rewriteOrFail(t, wireResponses, `{"model":"gemini-3.8-flash","input":"hi","tools":[`+toolSearchDecl+`,{"type":"function","name":"f","parameters":{}}]}`)
+	out := rewriteWireCompatOrFail(t, wireKindResponses, `{"model":"gemini-3.8-flash","input":"hi","tools":[`+toolSearchDecl+`,{"type":"function","name":"f","parameters":{}}]}`)
 	if gjson.GetBytes(out, "tools.0.type").String() != "function" || gjson.GetBytes(out, "tools.0.name").String() != "tool_search" {
 		t.Fatalf("top-level tool_search not flattened: %s", out)
 	}
@@ -54,7 +52,7 @@ func TestToolSearchGeminiTopLevelToolsDeclaredAsFunction(t *testing.T) {
 }
 
 func TestToolSearchGeminiHistoryRoundTrip(t *testing.T) {
-	out := rewriteOrFail(t, wireResponses, liteRequest("gemini-3.8-flash", toolSearchHistory))
+	out := rewriteWireCompatOrFail(t, wireKindResponses, liteRequest("gemini-3.8-flash", toolSearchHistory))
 	items := gjson.GetBytes(out, "input").Array()
 	var call, result gjson.Result
 	for _, item := range items {
@@ -94,7 +92,7 @@ func TestToolSearchGeminiLoadedToolsMergeIntoExistingNamespace(t *testing.T) {
 		"input":[{"type":"tool_search_call","call_id":"c","execution":"client","arguments":{"query":"x"}},
 		{"type":"tool_search_output","call_id":"c","execution":"client","tools":[{"type":"namespace","name":"mcp__dummy","tools":[
 			{"type":"function","name":"already","parameters":{}},{"type":"function","name":"fresh","parameters":{}}]}]}]}`
-	out := rewriteOrFail(t, wireResponses, body)
+	out := rewriteWireCompatOrFail(t, wireKindResponses, body)
 	names := gjson.GetBytes(out, `tools.#(name=="mcp__dummy").tools.#.name`).Raw
 	if names != `["already","fresh"]` {
 		t.Fatalf("namespace children = %s: %s", names, out)
@@ -104,37 +102,36 @@ func TestToolSearchGeminiLoadedToolsMergeIntoExistingNamespace(t *testing.T) {
 func TestToolSearchRequestsUntouchedOutsideEmulationScope(t *testing.T) {
 	history := toolSearchHistory
 	for _, model := range []string{"gpt-6-luna", "gpt-6.1-sol", "claude-sonnet-5-5", "devin/swe-2", "cursor/muse-spark-1.3-high"} {
-		if _, changed, err := rewriteRequestJSON(wireResponses, []byte(liteRequest(model, history))); err != nil || changed {
+		if _, changed, err := rewriteWireCompatRequestJSON(wireKindResponses, []byte(liteRequest(model, history))); err != nil || changed {
 			t.Fatalf("%s: changed=%v err=%v", model, changed, err)
 		}
 	}
 	// Other wires never carry the Responses tool_search protocol.
-	for _, w := range []wire{wireChat, wireMessages} {
-		if _, changed, err := rewriteRequestJSON(w, []byte(liteRequest("gemini-3.8-flash", history))); err != nil || changed {
+	for _, w := range []wireKind{wireKindChat, wireKindMessages} {
+		if _, changed, err := rewriteWireCompatRequestJSON(w, []byte(liteRequest("gemini-3.8-flash", history))); err != nil || changed {
 			t.Fatalf("wire %d: changed=%v err=%v", w, changed, err)
 		}
 	}
 	// Server-executed tool_search is OpenAI's hosted tool, not ours to emulate.
 	server := `{"model":"gemini-3.8-flash","input":"hi","tools":[{"type":"tool_search","execution":"server"}]}`
-	if _, changed, err := rewriteRequestJSON(wireResponses, []byte(server)); err != nil || changed {
+	if _, changed, err := rewriteWireCompatRequestJSON(wireKindResponses, []byte(server)); err != nil || changed {
 		t.Fatalf("server tool_search: changed=%v err=%v", changed, err)
 	}
 	// Without a declaration there is nothing to emulate.
-	if _, changed, err := rewriteRequestJSON(wireResponses, []byte(`{"model":"gemini-3.8-flash","input":"hi"}`)); err != nil || changed {
+	if _, changed, err := rewriteWireCompatRequestJSON(wireKindResponses, []byte(`{"model":"gemini-3.8-flash","input":"hi"}`)); err != nil || changed {
 		t.Fatalf("no declaration: changed=%v err=%v", changed, err)
 	}
 }
 
 func TestToolSearchOpenCodeKeepsExistingBehaviour(t *testing.T) {
-	out := rewriteOrFail(t, wireResponses, liteRequest("opencode-go/deepseek-v4.1-flash", ""))
+	out := rewriteWireCompatOrFail(t, wireKindResponses, liteRequest("opencode-go/deepseek-v4.1-flash", ""))
 	if strings.Contains(string(out), `"tool_search"`) && gjson.GetBytes(out, `tools.#(name=="tool_search")`).Exists() {
 		t.Fatalf("OpenCode route got a tool_search function: %s", out)
 	}
-	req := httptest.NewRequest(http.MethodPost, "/v1/responses", strings.NewReader(liteRequest("opencode-go/deepseek-v4.1-flash", "")))
-	if err := rewriteResponsesRequest(req); err != nil {
-		t.Fatal(err)
-	}
-	if enabled, _ := req.Context().Value(toolSearchKey{}).(bool); enabled {
+	recorder, _ := serveWireCompat(t, http.MethodPost, "/v1/responses",
+		liteRequest("opencode-go/deepseek-v4.1-flash", ""), "application/json",
+		`{"output":[{"type":"function_call","namespace":"tool_search","name":"tool_search_tool","arguments":"{}"}]}`)
+	if strings.Contains(recorder.Body.String(), "tool_search_call") {
 		t.Fatal("tool_search restore enabled for an OpenCode route")
 	}
 }
@@ -145,7 +142,7 @@ func TestRestoreToolSearchCallSpellings(t *testing.T) {
 		{"emulated", `{"type":"function_call","id":"fc_1","call_id":"c1","name":"tool_search","arguments":"{\"query\":\"q\"}","status":"completed"}`},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			item := decodeTestJSON(t, []byte(tc.item))
+			item := decodeWireCompatJSON(t, []byte(tc.item))
 			if !restoreToolSearchCall(item) {
 				t.Fatal("not restored")
 			}
@@ -170,7 +167,7 @@ func TestRestoreToolSearchCallSpellings(t *testing.T) {
 		`{"type":"tool_search_call","call_id":"c","execution":"client","arguments":{}}`,
 		`{"type":"message","role":"assistant"}`,
 	} {
-		item := decodeTestJSON(t, []byte(other))
+		item := decodeWireCompatJSON(t, []byte(other))
 		if restoreToolSearchCall(item) {
 			t.Fatalf("restored unrelated item: %s", other)
 		}
@@ -178,11 +175,11 @@ func TestRestoreToolSearchCallSpellings(t *testing.T) {
 }
 
 func TestRestoreToolSearchCallBadArgumentsFallBackToQuery(t *testing.T) {
-	item := decodeTestJSON(t, []byte(`{"type":"function_call","namespace":"tool_search","name":"tool_search_tool","arguments":"find the thing"}`))
+	item := decodeWireCompatJSON(t, []byte(`{"type":"function_call","namespace":"tool_search","name":"tool_search_tool","arguments":"find the thing"}`))
 	if !restoreToolSearchCall(item) || item["arguments"].(map[string]any)["query"] != "find the thing" {
 		t.Fatalf("bad arguments not wrapped: %v", item)
 	}
-	empty := decodeTestJSON(t, []byte(`{"type":"function_call","namespace":"tool_search","name":"tool_search_tool","arguments":""}`))
+	empty := decodeWireCompatJSON(t, []byte(`{"type":"function_call","namespace":"tool_search","name":"tool_search_tool","arguments":""}`))
 	if !restoreToolSearchCall(empty) || len(empty["arguments"].(map[string]any)) != 0 {
 		t.Fatalf("empty arguments: %v", empty)
 	}
@@ -190,20 +187,8 @@ func TestRestoreToolSearchCallBadArgumentsFallBackToQuery(t *testing.T) {
 
 func toolSearchResponse(t *testing.T, requestBody, contentType, raw string) string {
 	t.Helper()
-	req := httptest.NewRequest(http.MethodPost, "/v1/responses", strings.NewReader(requestBody))
-	if err := rewriteResponsesRequest(req); err != nil {
-		t.Fatal(err)
-	}
-	resp := &http.Response{StatusCode: 200, Request: req, Header: http.Header{"Content-Type": []string{contentType}}, Body: io.NopCloser(strings.NewReader(raw))}
-	if err := modifyResponse(resp); err != nil {
-		t.Fatal(err)
-	}
-	result, err := io.ReadAll(resp.Body)
-	_ = resp.Body.Close()
-	if err != nil {
-		t.Fatal(err)
-	}
-	return string(result)
+	recorder, _ := serveWireCompat(t, http.MethodPost, "/v1/responses", requestBody, contentType, raw)
+	return recorder.Body.String()
 }
 
 func TestToolSearchNonStreamingRestore(t *testing.T) {
@@ -308,16 +293,9 @@ func TestToolSearchResponseScope(t *testing.T) {
 		t.Fatalf("response changed without a declaration: %s", got)
 	}
 	// Other wires.
-	req := httptest.NewRequest(http.MethodPost, "/v1/chat/completions", strings.NewReader(liteRequest("gpt-6-luna", "")))
-	if err := rewriteResponsesRequest(req); err != nil {
-		t.Fatal(err)
-	}
-	resp := &http.Response{StatusCode: 200, Request: req, Header: http.Header{"Content-Type": []string{"application/json"}}, Body: io.NopCloser(strings.NewReader(raw))}
-	if err := modifyResponse(resp); err != nil {
-		t.Fatal(err)
-	}
-	if got, _ := io.ReadAll(resp.Body); string(got) != raw {
-		t.Fatalf("chat wire response changed: %s", got)
+	recorder, _ := serveWireCompat(t, http.MethodPost, "/v1/chat/completions", liteRequest("gpt-6-luna", ""), "application/json", raw)
+	if recorder.Body.String() != raw {
+		t.Fatalf("chat wire response changed: %s", recorder.Body.String())
 	}
 	// Native routes already answer with tool_search_call; nothing to restore.
 	native := `{"output":[{"type":"tool_search_call","id":"tsc_1","call_id":"c","execution":"client","arguments":{"query":"q"}}]}`
@@ -325,15 +303,8 @@ func TestToolSearchResponseScope(t *testing.T) {
 		t.Fatalf("native tool_search_call reshaped: %s", got)
 	}
 	// Upstream errors pass through.
-	req = httptest.NewRequest(http.MethodPost, "/v1/responses", strings.NewReader(liteRequest("gpt-6-luna", "")))
-	if err := rewriteResponsesRequest(req); err != nil {
-		t.Fatal(err)
-	}
-	resp = &http.Response{StatusCode: 400, Request: req, Header: http.Header{"Content-Type": []string{"application/json"}}, Body: io.NopCloser(strings.NewReader(raw))}
-	if err := modifyResponse(resp); err != nil {
-		t.Fatal(err)
-	}
-	if got, _ := io.ReadAll(resp.Body); string(got) != raw {
-		t.Fatalf("error response changed: %s", got)
+	recorder, _ = serveWireCompatStatus(t, http.MethodPost, "/v1/responses", liteRequest("gpt-6-luna", ""), "application/json", http.StatusBadRequest, raw)
+	if recorder.Body.String() != raw {
+		t.Fatalf("error response changed: %s", recorder.Body.String())
 	}
 }

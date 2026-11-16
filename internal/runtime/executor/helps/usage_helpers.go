@@ -51,13 +51,16 @@ type UsageReporter struct {
 	generate             bool
 	stream               bool
 	requestedAt          time.Time
-	ttftMu               sync.RWMutex
-	ttft                 time.Duration
-	firstPacketDuration  time.Duration
-	firstPacketSet       bool
-	ttftStart            time.Time
-	ttftSet              bool
-	once                 sync.Once
+	// ginContext is a detached snapshot of the request's pooled *gin.Context captured
+	// while it was still valid; late publishes must never touch the pooled original.
+	ginContext          *gin.Context
+	ttftMu              sync.RWMutex
+	ttft                time.Duration
+	firstPacketDuration time.Duration
+	firstPacketSet      bool
+	ttftStart           time.Time
+	ttftSet             bool
+	once                sync.Once
 
 	responseModelMu sync.RWMutex
 	// responseModel holds the latest model name reported by the upstream response.
@@ -157,6 +160,11 @@ func NewUsageReporter(ctx context.Context, provider, model string, auth *cliprox
 		reporter.authID = auth.ID
 		reporter.authIndex = auth.EnsureIndex()
 		reporter.accessTokenHash = authAccessTokenSHA256(auth)
+	}
+	if ctx != nil {
+		if ginCtx, ok := ctx.Value("gin").(*gin.Context); ok && ginCtx != nil {
+			reporter.ginContext = cliproxyauth.DetachGinContext(ginCtx)
+		}
 	}
 	return reporter
 }
@@ -614,7 +622,24 @@ func (r *UsageReporter) publishAttemptRecord(ctx context.Context, record usage.R
 
 func (r *UsageReporter) publishRecord(ctx context.Context, record usage.Record) {
 	record.ResponseHeaders = internallogging.GetResponseHeaders(ctx)
-	usage.PublishRecord(ctx, record)
+	usage.PublishRecord(r.publishContext(ctx), record)
+}
+
+// publishContext swaps the pooled *gin.Context in ctx for the detached snapshot taken
+// at reporter construction. Usage records can be published from executor background
+// goroutines that outlive the originating handler, after which gin resets and reuses
+// the pooled context; without a snapshot the pooled reference is dropped entirely.
+func (r *UsageReporter) publishContext(ctx context.Context) context.Context {
+	if ctx == nil {
+		return nil
+	}
+	if _, ok := ctx.Value("gin").(*gin.Context); !ok {
+		return ctx
+	}
+	if r != nil && r.ginContext != nil {
+		return context.WithValue(ctx, "gin", r.ginContext)
+	}
+	return context.WithValue(ctx, "gin", struct{}{})
 }
 
 // RequestID returns the execution instance request ID for this reporter.
