@@ -36,4 +36,6 @@ The system CPA LaunchDaemons are protected by the host's working agreements. Sou
 
 ## Historical Linux builder
 
+The ZAI plugin source lives in [`KldsSeeGhosts/CPA-Manager-Plus/plugins/zai`](https://github.com/KldsSeeGhosts/CPA-Manager-Plus/tree/main/plugins/zai) (private repository; consolidation tracked in [CPA-Manager-Plus#3](https://github.com/KldsSeeGhosts/CPA-Manager-Plus/pull/3)).
+
 The tools/build-erm.sh helper is Linux-only and produces one backend binary. Its optional plugin build retains the historical baseline-ISA toolchain constraints. It is not the Studio build or deployment path, and it must not activate the fenced Ubuntu service.
