@@ -66,17 +66,17 @@ func GetCodexFreeModels() []*ModelInfo {
 
 // GetCodexTeamModels returns model definitions for the Codex team plan tier.
 func GetCodexTeamModels() []*ModelInfo {
-	return WithCodexBuiltins(cloneModelInfos(getModels().CodexTeam))
+	return withCodexBuiltinGPT62(WithCodexBuiltins(cloneModelInfos(getModels().CodexTeam)))
 }
 
 // GetCodexPlusModels returns model definitions for the Codex plus plan tier.
 func GetCodexPlusModels() []*ModelInfo {
-	return WithCodexBuiltins(cloneModelInfos(getModels().CodexPlus))
+	return withCodexBuiltinGPT62(WithCodexBuiltins(cloneModelInfos(getModels().CodexPlus)))
 }
 
 // GetCodexProModels returns model definitions for the Codex pro plan tier.
 func GetCodexProModels() []*ModelInfo {
-	return WithCodexBuiltins(cloneModelInfos(getModels().CodexPro))
+	return withCodexBuiltinGPT62(WithCodexBuiltins(cloneModelInfos(getModels().CodexPro)))
 }
 
 // GetKimiModels returns the standard Kimi (Moonshot AI) model definitions.
@@ -321,6 +321,54 @@ func normalizeAntigravityCapabilityModelID(modelID string) string {
 		modelID = strings.TrimSpace(modelID[:open])
 	}
 	return modelID
+}
+
+// withCodexBuiltinGPT62 adds GPT 6.2 Sol and Astra to the paid Codex tiers
+// while remote catalogs lack them (fork). Limits come from the Codex backend's
+// model list on 2026-11-17. Existing entries are never replaced.
+func withCodexBuiltinGPT62(models []*ModelInfo) []*ModelInfo {
+	var sol *ModelInfo
+	present := map[string]bool{}
+	for _, model := range models {
+		if model == nil {
+			continue
+		}
+		present[model.ID] = true
+		if model.ID == "gpt-6.1-sol" {
+			sol = model
+		}
+	}
+	levels := []string{"low", "medium", "high", "xhigh", "max", "ultra"}
+	build := func(id, name, description string, contextLength int, inputs []string) *ModelInfo {
+		var model *ModelInfo
+		if sol != nil {
+			model = cloneModelInfo(sol)
+		} else {
+			model = &ModelInfo{Object: "model", OwnedBy: "openai", Type: "openai", SupportedParameters: []string{"tools"}}
+		}
+		model.ID = id
+		model.DisplayName = name
+		model.Version = "gpt-6.2"
+		model.Description = description
+		model.Created = 1794873600 // 2026-11-17
+		model.ContextLength = contextLength
+		model.MaxCompletionTokens = 128000
+		model.Thinking = &ThinkingSupport{Levels: append([]string(nil), levels...)}
+		model.SupportedInputModalities = append([]string(nil), inputs...)
+		model.SupportedOutputModalities = []string{"text"}
+		return model
+	}
+	var extras []*ModelInfo
+	if !present["gpt-6.2-sol"] {
+		extras = append(extras, build("gpt-6.2-sol", "GPT 6.2 Sol", "Latest workhorse model for coding and everyday work.", 500000, []string{"text", "image", "audio"}))
+	}
+	if !present["gpt-6.2-astra"] {
+		extras = append(extras, build("gpt-6.2-astra", "GPT 6.2 Astra", "Our most capable model for complex, demanding work.", 272000, []string{"text", "image"}))
+	}
+	if len(extras) == 0 {
+		return models
+	}
+	return upsertModelInfos(models, extras...)
 }
 
 // withCodexBuiltinTerra61 keeps GPT 6.1 Terra available on the paid Codex
