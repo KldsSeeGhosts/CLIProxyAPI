@@ -130,3 +130,72 @@ func TestGeminiForwardStreamKeepsHeartbeatsForOtherClients(t *testing.T) {
 		})
 	}
 }
+
+type flushSignalRecorder struct {
+	*httptest.ResponseRecorder
+	flushed chan string
+}
+
+func (r *flushSignalRecorder) Flush() {
+	r.ResponseRecorder.Flush()
+	select {
+	case r.flushed <- r.Body.String():
+	default:
+	}
+}
+
+func TestGeminiAntigravityCommitsHeadersBeforeFirstToken(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	commit := make(chan time.Time)
+	restoreTimer := antigravityHeaderCommitTimer
+	antigravityHeaderCommitTimer = func(delay time.Duration) (<-chan time.Time, func()) {
+		if delay != antigravityHeaderCommitDelay {
+			t.Errorf("delay = %v, want %v", delay, antigravityHeaderCommitDelay)
+		}
+		return commit, func() {}
+	}
+	t.Cleanup(func() { antigravityHeaderCommitTimer = restoreTimer })
+
+	chunks := make(chan coreexecutor.StreamChunk)
+	executor := &preFTKeepAliveGeminiExecutor{chunks: chunks}
+	manager := coreauth.NewManager(nil, nil, nil)
+	manager.RegisterExecutor(executor)
+	auth := &coreauth.Auth{ID: "early-headers-auth", Provider: executor.Identifier(), Status: coreauth.StatusActive}
+	if _, err := manager.Register(context.Background(), auth); err != nil {
+		t.Fatal(err)
+	}
+	model := "early-headers-model"
+	registry.GetGlobalRegistry().RegisterClient(auth.ID, auth.Provider, []*registry.ModelInfo{{ID: model}})
+	t.Cleanup(func() { registry.GetGlobalRegistry().UnregisterClient(auth.ID) })
+
+	h := NewGeminiAPIHandler(handlers.NewBaseAPIHandlers(&sdkconfig.SDKConfig{
+		Streaming: sdkconfig.StreamingConfig{KeepAliveSeconds: 5, SendKeepAliveBeforeFT: true},
+	}, manager))
+	router := gin.New()
+	router.POST("/v1beta/models/*action", h.GeminiHandler)
+	request := httptest.NewRequest(http.MethodPost, "/v1beta/models/"+model+":streamGenerateContent?alt=sse",
+		strings.NewReader(`{"contents":[{"parts":[{"text":"hi"}]}]}`))
+	request.Header.Set("User-Agent", "google-antigravity-sdk/0.0.0-dev")
+	recorder := &flushSignalRecorder{ResponseRecorder: httptest.NewRecorder(), flushed: make(chan string, 1)}
+	done := make(chan struct{})
+	go func() {
+		router.ServeHTTP(recorder, request)
+		close(done)
+	}()
+
+	commit <- time.Unix(1, 0)
+	if body := <-recorder.flushed; body != "" {
+		t.Fatalf("header commit wrote a body: %q", body)
+	}
+	chunks <- coreexecutor.StreamChunk{Payload: []byte(`{"candidates":[{"finishReason":"STOP"}]}`)}
+	close(chunks)
+	<-done
+
+	if recorder.Code != http.StatusOK || recorder.Header().Get("Content-Type") != "text/event-stream" {
+		t.Fatalf("status=%d content-type=%q", recorder.Code, recorder.Header().Get("Content-Type"))
+	}
+	body := recorder.Body.String()
+	if strings.Contains(body, "keep-alive") || !strings.Contains(body, `data: {"candidates":[{"finishReason":"STOP"}]}`) {
+		t.Fatalf("unexpected SSE body: %q", body)
+	}
+}

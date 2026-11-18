@@ -226,6 +226,14 @@ func (h *GeminiAPIHandler) handleStreamGenerateContent(c *gin.Context, modelName
 	stopKeepAlive := func() {}
 	if !geminiStreamKeepAliveDisabled(c, alt) {
 		keepAliveC, stopKeepAlive = handlers.NewPreFirstTokenKeepAliveTicker(h.CurrentConfig())
+	} else if alt == "" && isAntigravitySDKClient(c) {
+		// The SDK gives up after 60s without response headers, so commit them while slow models think.
+		keepAliveC, stopKeepAlive = antigravityHeaderCommitTimer(antigravityHeaderCommitDelay)
+		writeKeepAlive = func() bool {
+			commitHeaders()
+			flusher.Flush()
+			return true
+		}
 	}
 	defer stopKeepAlive()
 
@@ -366,7 +374,19 @@ func (h *GeminiAPIHandler) handleGenerateContent(c *gin.Context, modelName strin
 // Antigravity's SDK rejects SSE comment heartbeats as invalid stream chunks.
 // Suppress only proxy-generated heartbeats for this client, not other streams.
 func geminiStreamKeepAliveDisabled(c *gin.Context, alt string) bool {
-	return alt != "" || strings.HasPrefix(c.GetHeader("User-Agent"), "google-antigravity-sdk/")
+	return alt != "" || isAntigravitySDKClient(c)
+}
+
+func isAntigravitySDKClient(c *gin.Context) bool {
+	return strings.HasPrefix(c.GetHeader("User-Agent"), "google-antigravity-sdk/")
+}
+
+// Late enough that fast failures still rotate credentials and return a real status.
+const antigravityHeaderCommitDelay = 20 * time.Second
+
+var antigravityHeaderCommitTimer = func(delay time.Duration) (<-chan time.Time, func()) {
+	timer := time.NewTimer(delay)
+	return timer.C, func() { timer.Stop() }
 }
 
 func (h *GeminiAPIHandler) forwardGeminiStream(c *gin.Context, flusher http.Flusher, alt string, cancel func(error), data <-chan []byte, errs <-chan *interfaces.ErrorMessage) {
