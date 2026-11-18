@@ -37,3 +37,18 @@ func TestArgonResponsesReasoningEffortSelectsTier(t *testing.T) {
 		}
 	}
 }
+
+func TestTierEnvelopeUsesHarnessEffortSlug(t *testing.T) {
+	for _, tc := range []struct{ requested, level, want string }{
+		{"gemini-4-hydrogen-xhigh", "medium", "gemini-4-hydrogen-medium"},
+		{"gemini-4-carbon-high", "low", "gemini-4-carbon-low"},
+		{"claude-opus-5-5-high", "medium", "claude-opus-5-5-medium"},
+		{"claude-sonnet-5-5-high", "low", "claude-sonnet-5-5-low"},
+	} {
+		payload := []byte(`{"request":{"generationConfig":{"thinkingConfig":{"thinkingLevel":"` + tc.level + `"}},"contents":[{"role":"user","parts":[{"text":"local fixture"}]}]}}`)
+		body := geminiToAntigravity(tc.requested, payload, "fixture-project")
+		if got := gjson.GetBytes(body, "model").String(); got != tc.want {
+			t.Fatalf("%s at %s maps to %s", tc.requested, tc.level, got)
+		}
+	}
+}

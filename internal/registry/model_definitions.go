@@ -273,14 +273,81 @@ func WithXAIBuiltins(models []*ModelInfo) []*ModelInfo {
 // withAntigravityBuiltins keeps newly released models routable when the remote
 // catalog refresh lags behind the authenticated Antigravity model catalog.
 func withAntigravityBuiltins(models []*ModelInfo) []*ModelInfo {
-	return upsertModelInfos(models,
+	extras := []*ModelInfo{
 		antigravityGemini38FlashModelInfo("low"),
 		antigravityGemini38FlashModelInfo("medium"),
 		antigravityGemini38FlashModelInfo("high"),
 		antigravityArgonModelInfo("low"),
 		antigravityArgonModelInfo("medium"),
 		antigravityArgonModelInfo("high"),
-	)
+	}
+	for _, family := range antigravityTierFamilies {
+		template := antigravityTierTemplate(models, family)
+		for _, tier := range family.levels {
+			extras = append(extras, antigravityTierModelInfo(family, template, tier))
+		}
+	}
+	return upsertModelInfos(models, extras...)
+}
+
+// antigravityTierFamily describes a model Google publishes as one slug per
+// reasoning tier. Limits match fetchAvailableModels on 2026-11-17; the remote
+// catalog listed Hydrogen and Carbon output equal to their context window.
+type antigravityTierFamily struct {
+	base        string
+	displayName string
+	levels      []string
+	context     int
+	maxOutput   int
+	claude      bool
+}
+
+var antigravityTierFamilies = []antigravityTierFamily{
+	{base: "gemini-4-hydrogen", displayName: "Gemini 4 Hydrogen", levels: []string{"low", "medium", "high", "xhigh"}, context: 1048576, maxOutput: 262144},
+	{base: "gemini-4-carbon", displayName: "Gemini 4 Carbon", levels: []string{"low", "medium", "high"}, context: 1048576, maxOutput: 262144},
+	{base: "claude-opus-5-5", displayName: "Claude Opus 5.5", levels: []string{"low", "medium", "high"}, context: 1000000, maxOutput: 128000, claude: true},
+	{base: "claude-sonnet-5-5", displayName: "Claude Sonnet 5.5", levels: []string{"low", "medium", "high"}, context: 1000000, maxOutput: 128000, claude: true},
+}
+
+// antigravityTierTemplate returns the catalog entry for any tier of the family.
+func antigravityTierTemplate(models []*ModelInfo, family antigravityTierFamily) *ModelInfo {
+	for _, tier := range family.levels {
+		id := family.base + "-" + tier
+		for _, model := range models {
+			if model != nil && strings.EqualFold(strings.TrimSpace(model.ID), id) {
+				return model
+			}
+		}
+	}
+	return nil
+}
+
+func antigravityTierModelInfo(family antigravityTierFamily, template *ModelInfo, tier string) *ModelInfo {
+	var model *ModelInfo
+	if template != nil {
+		model = cloneModelInfo(template)
+	} else {
+		model = &ModelInfo{Object: "model", OwnedBy: "antigravity", Type: "antigravity"}
+		if family.claude {
+			model.Thinking = &ThinkingSupport{Min: 1024, Max: 64000, ZeroAllowed: true, DynamicAllowed: true}
+			model.SupportedInputModalities = []string{"text", "image"}
+		} else {
+			model.Thinking = &ThinkingSupport{Min: 1, Max: 65535, DynamicAllowed: true}
+			model.SupportedInputModalities = []string{"text", "image", "audio", "video"}
+		}
+		model.SupportedOutputModalities = []string{"text"}
+	}
+	if model.Thinking == nil {
+		model.Thinking = &ThinkingSupport{}
+	}
+	model.Thinking.Levels = append([]string(nil), family.levels...)
+	model.ID = family.base + "-" + tier
+	model.Name = model.ID
+	model.DisplayName = family.displayName
+	model.Description = family.displayName + " (" + tier + ")"
+	model.ContextLength = family.context
+	model.MaxCompletionTokens = family.maxOutput
+	return model
 }
 
 func antigravityArgonModelInfo(tier string) *ModelInfo {
