@@ -150,12 +150,127 @@ func ConvertGeminiRequestToAntigravity(modelName string, inputRawJSON []byte, _ 
 	rawJSON = rewriteGeminiFunctionNames(rawJSON, functionNameMap)
 
 	if strings.Contains(strings.ToLower(modelName), "claude") {
+		rawJSON = normalizeAntigravityClaudeToolIDs(rawJSON)
 		rawJSON = SanitizeAntigravityClaudeGeminiRequestSignatures(modelName, rawJSON)
 	} else {
 		rawJSON = signature.SanitizeGeminiRequestThoughtSignatures(rawJSON, "request.contents")
 	}
 
 	return common.AttachDefaultSafetySettings(rawJSON, "request.safetySettings"), nil
+}
+
+// Gemini clients may omit IDs, but the Claude backend requires paired tool-use IDs.
+func normalizeAntigravityClaudeToolIDs(rawJSON []byte) []byte {
+	type call struct {
+		path string
+		name string
+		id   string
+		part gjson.Result
+	}
+	contents := util.GetGJSONBytesNoCopy(rawJSON, "request.contents").Array()
+	updates := make(map[string][]byte)
+	setID := func(path string, part gjson.Result, field, id string) {
+		raw, ok := updates[path]
+		if !ok {
+			raw = []byte(part.Raw)
+		}
+		updates[path], _ = sjson.SetBytes(raw, field+".id", id)
+	}
+	used := make(map[string]bool)
+	for _, content := range contents {
+		for _, part := range content.Get("parts").Array() {
+			for _, field := range []string{"functionCall", "functionResponse"} {
+				if id := part.Get(field + ".id").String(); id != "" {
+					used[id] = true
+				}
+			}
+		}
+	}
+	counter := 0
+	newID := func() string {
+		for {
+			counter++
+			id := fmt.Sprintf("cpa_agy_tool_%d", counter)
+			if !used[id] {
+				used[id] = true
+				return id
+			}
+		}
+	}
+	var pending []call
+	for contentIndex, content := range contents {
+		for partIndex, part := range content.Get("parts").Array() {
+			path := fmt.Sprintf("%d.%d", contentIndex, partIndex)
+			if fc := part.Get("functionCall"); fc.IsObject() {
+				pending = append(pending, call{path, fc.Get("name").String(), fc.Get("id").String(), part})
+			}
+			fr := part.Get("functionResponse")
+			if !fr.IsObject() {
+				continue
+			}
+			id, name := fr.Get("id").String(), fr.Get("name").String()
+			match := -1
+			for i, candidate := range pending {
+				if id != "" && candidate.id == id {
+					match = i
+					break
+				}
+			}
+			if match < 0 {
+				for i, candidate := range pending {
+					if (name == "" || candidate.name == name) && (id == "" || candidate.id == "") {
+						match = i
+						break
+					}
+				}
+			}
+			if match < 0 {
+				continue
+			}
+			candidate := pending[match]
+			pending = append(pending[:match], pending[match+1:]...)
+			if id == "" {
+				id = candidate.id
+			}
+			if id == "" {
+				id = newID()
+			}
+			if candidate.id == "" {
+				setID(candidate.path, candidate.part, "functionCall", id)
+			}
+			if fr.Get("id").String() == "" {
+				setID(path, part, "functionResponse", id)
+			}
+		}
+	}
+	for _, candidate := range pending {
+		if candidate.id == "" {
+			setID(candidate.path, candidate.part, "functionCall", newID())
+		}
+	}
+	if len(updates) == 0 {
+		return rawJSON
+	}
+	contentItems := make([][]byte, 0, len(contents))
+	for contentIndex, content := range contents {
+		var partItems [][]byte
+		changed := false
+		for partIndex, part := range content.Get("parts").Array() {
+			if updated, ok := updates[fmt.Sprintf("%d.%d", contentIndex, partIndex)]; ok {
+				partItems = append(partItems, updated)
+				changed = true
+			} else {
+				partItems = append(partItems, []byte(part.Raw))
+			}
+		}
+		contentJSON := []byte(content.Raw)
+		if changed {
+			contentJSON, _ = sjson.SetRawBytes(contentJSON, "parts", translatorcommon.JoinRawArray(partItems))
+		}
+		contentItems = append(contentItems, contentJSON)
+	}
+	rawJSON, _ = sjson.SetRawBytes(rawJSON, "request.contents", translatorcommon.JoinRawArray(contentItems))
+	return rawJSON
 }
 
 // normalizeGeminiGenerationConfigResponseSchema converts generationConfig.responseJsonSchema

@@ -220,6 +220,63 @@ func TestConvertGeminiRequestToAntigravity_ClaudeModelStripsUnneededFunctionCall
 	if part.Get("thoughtSignature").Exists() {
 		t.Fatalf("functionCall thoughtSignature should be stripped for Claude target. Output: %s", output)
 	}
+	if part.Get("functionCall.id").String() == "" {
+		t.Fatalf("Claude function calls require an ID even before a result arrives. Output: %s", output)
+	}
+}
+
+func TestConvertGeminiRequestToAntigravity_ClaudeToolIDs(t *testing.T) {
+	for _, model := range []string{"claude-opus-5-5-medium", "claude-sonnet-5-5-high", "gemini-4-carbon-high"} {
+		t.Run(model, func(t *testing.T) {
+			input := []byte(`{"contents":[
+				{"role":"user","parts":[{"text":"inspect files"}]},
+				{"role":"model","parts":[
+					{"functionCall":{"name":"read","args":{"path":"a"}}},
+					{"functionCall":{"id":"cpa_agy_tool_1","name":"read","args":{"path":"b"}}},
+					{"functionCall":{"name":"run","args":{}}}
+				]},
+				{"role":"user","parts":[
+					{"functionResponse":{"id":"cpa_agy_tool_1","name":"read","response":{"result":"b"}}},
+					{"functionResponse":{"name":"read","response":{"result":"a"}}},
+					{"functionResponse":{"id":"from-response","name":"run","response":{"result":"ok"}}}
+				]},
+				{"role":"model","parts":[{"functionCall":{"name":"read","args":{"path":"c"}}}]},
+				{"role":"user","parts":[{"functionResponse":{"name":"read","response":{"result":"c"}}}]}
+			]}`)
+			output, err := ConvertGeminiRequestToAntigravity(model, input, true)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if model == "gemini-4-carbon-high" {
+				if gjson.GetBytes(output, "request.contents.1.parts.0.functionCall.id").Exists() {
+					t.Fatal("Gemini tool IDs must remain untouched")
+				}
+				return
+			}
+			seen := map[string]bool{}
+			for _, pair := range [][2]string{
+				{"1.parts.0.functionCall", "2.parts.1.functionResponse"},
+				{"1.parts.1.functionCall", "2.parts.0.functionResponse"},
+				{"1.parts.2.functionCall", "2.parts.2.functionResponse"},
+				{"3.parts.0.functionCall", "4.parts.0.functionResponse"},
+			} {
+				callID := gjson.GetBytes(output, "request.contents."+pair[0]+".id").String()
+				resultID := gjson.GetBytes(output, "request.contents."+pair[1]+".id").String()
+				if callID == "" || resultID != callID || seen[callID] {
+					t.Fatalf("missing, mismatched or duplicate tool IDs: call=%q result=%q output=%s", callID, resultID, output)
+				}
+				seen[callID] = true
+			}
+			for path, want := range map[string]string{
+				"request.contents.1.parts.1.functionCall.id": "cpa_agy_tool_1",
+				"request.contents.1.parts.2.functionCall.id": "from-response",
+			} {
+				if got := gjson.GetBytes(output, path).String(); got != want {
+					t.Fatalf("%s = %q, want %q", path, got, want)
+				}
+			}
+		})
+	}
 }
 
 func TestConvertGeminiRequestToAntigravity_AddSkipSentinelToFunctionCall(t *testing.T) {
